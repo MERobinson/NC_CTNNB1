@@ -1,0 +1,84 @@
+# TF binding distribution
+
+## Setup
+```{r setup, warning=F, message=F}
+library(tidyverse)
+tfdb <- readRDS("../processed_data/ChIPseq/Bcat_Ik_DBanno.2021-02-17.rds")
+h3kdb <- readRDS("../processed_data/ChIPseq/BcatGOF_H3K_DB_DE_TF_combined.2021-04-27.rds")
+names(h3kdb) <- c("H3K27ac","H3K4me3")
+```
+
+## Set binding group
+```{r dbgroup, warning=F, message=F}
+tfdb <- lapply(tfdb, function(x) {
+  gr <- x@anno
+  gr$dbgroup <- NA
+  gr[which(gr$Fold > log2(1.5) & gr$FDR < 0.05),]$dbgroup <- "up"
+  gr[which(gr$Fold > log2(1.5) & gr$FDR < 0.05 & mcols(gr)[,3] < 5),]$dbgroup <-  "denovo"
+  gr[which(gr$FDR > 0.5 & mcols(gr)[,2] > 5 & mcols(gr)[,3] > 5),]$dbgroup <-  "unaltered"
+  gr[which(gr$Fold < -log2(1.5) & gr$FDR < 0.05),]$dbgroup <-  "down"
+  gr[which(gr$Fold < -log2(1.5) & gr$FDR < 0.05 & mcols(gr)[,2] < 5),]$dbgroup <-  "lost"
+  print(table(gr$dbgroup))
+  return(gr)
+})
+```
+
+## Add H3K to db regions
+```{r act_reg, message=F, warning=F}
+h3ksub <- list("H3K27ac_Cre_NTC" = h3kdb$H3K27ac[h3kdb$H3K27ac$signal_Cre_NTC > 5, ],
+               "H3K27ac_Cre_Ik13KO" = h3kdb$H3K27ac[h3kdb$H3K27ac$signal_Cre_Ikzf13KO > 5, ],
+               "H3K4me3_Cre_NTC" = h3kdb$H3K4me3[h3kdb$H3K4me3$signal_Cre_NTC > 5, ],
+               "H3K4me3_Cre_Ik13KO" = h3kdb$H3K4me3[h3kdb$H3K4me3$signal_Cre_Ikzf13KO > 5, ])
+tfdb <- lapply(tfdb, function(x) {
+  for (mark in names(h3ksub)) {
+    ol <- findOverlaps(x, h3ksub[[mark]])
+    mcols(x)[, mark] <- F
+    mcols(x)[unique(queryHits(ol)), mark] <- T
+  }
+  x$CreNTC_loc <- NA
+  x[which(abs(x$distanceToTSS) > 5000 & x$H3K27ac_Cre_NTC == T),]$CreNTC_loc <- "Active enhancer"
+  x[which(abs(x$distanceToTSS) > 5000 & x$H3K27ac_Cre_NTC == F),]$CreNTC_loc <- "Inactive enhancer"
+  x[which(abs(x$distanceToTSS) < 5000 & x$H3K4me3_Cre_NTC == T),]$CreNTC_loc <- "Active promoter"
+  x[which(abs(x$distanceToTSS) < 5000 & x$H3K4me3_Cre_NTC == F),]$CreNTC_loc <- "Inactive promoter"
+  x$CreIk13KO_loc <- NA
+  x[which(abs(x$distanceToTSS) > 5000 & x$H3K27ac_Cre_Ik13KO == T),]$CreIk13KO_loc <- "Active enhancer"
+  x[which(abs(x$distanceToTSS) > 5000 & x$H3K27ac_Cre_Ik13KO == F),]$CreIk13KO_loc <- "Inactive enhancer"
+  x[which(abs(x$distanceToTSS) < 5000 & x$H3K4me3_Cre_Ik13KO == T),]$CreIk13KO_loc <- "Active promoter"
+  x[which(abs(x$distanceToTSS) < 5000 & x$H3K4me3_Cre_Ik13KO == F),]$CreIk13KO_loc <- "Inactive promoter"
+  return(x)
+})
+```
+
+## Plot distibutions
+```{r plotdist, message=F, warning=F}
+source("../../resources/pptx_plot_func.R")
+lapply(names(tfdb), function(tf) {
+  p <- as.data.frame(tfdb[[tf]]) %>%
+    select(dbgroup, CreNTC_loc, CreIk13KO_loc) %>%
+    gather("condition", "location", -1) %>%
+    group_by(dbgroup, condition, location) %>%
+    summarise(n=n()) %>%
+    group_by(dbgroup, condition) %>%
+    summarise(location=location, 
+              n=n, 
+              ncond=sum(n)) %>%
+    na.omit() %>%
+    mutate(prop = n/ncond,
+           condition = factor(condition, 
+                              levels=c("CreNTC_loc","CreIk13KO_loc"),
+                              labels=c("Cre NTC","Cre Ikzf13-KO")),
+           dbgroup = factor(dbgroup, 
+                             levels=c("denovo","up","unaltered","down","lost"))) %>%
+    ggplot(aes(x=condition, y=prop, fill=location)) +
+    geom_bar(stat="identity") +
+    facet_wrap(~dbgroup, nrow=1) +
+    scale_fill_manual(values=c("steelblue4","steelblue2","grey80","grey40")) +
+    scale_y_continuous(expand=c(0,0)) +
+    theme(panel.grid = element_blank(),
+          panel.background = element_blank(),
+          axis.line.y = element_line())
+  gen_pptx(p, paste0("../img/", tf, "_DB_H3K_location_dist.pptx"), 
+           height=3, width=4.5)
+})
+```
+

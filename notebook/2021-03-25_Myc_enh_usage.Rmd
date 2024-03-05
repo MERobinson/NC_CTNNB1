@@ -1,0 +1,293 @@
+# Myc Enhancer Usage
+
+## Setup
+```{r load_enh, message=F, warning=F}}
+library(tidyverse)
+library(rtracklayer)
+library(bamsignals)
+library(rvg)
+library(officer)
+old_path <- Sys.getenv("PATH")
+Sys.setenv(PATH = paste(old_path, "/Users/mer92/opt/miniconda3/bin", sep = ":"))
+```
+
+## Check BAM indexes
+```{bash index_bam, eval=F}
+bam_files=$(find '../public_data/H3K27ac' -iname '*.bam')
+for file in $bam_files
+do
+  if ! test -f "${file}.bai" ; then
+    echo "Working on ${file}"
+    samtools index $file
+  else
+    echo "Already indexed ${file}"
+  fi
+done
+```
+
+## Get total counts
+```{bash read_counts, eval=F}
+> "../public_data/H3K27ac/read_counts.txt"
+bam_files=$(find '../public_data/H3K27ac' -iname '*.bam')
+for file in $bam_files; do
+  readcount=$(samtools idxstats $file | awk '{s+=$3}END{print s}')
+  name=$(basename $file .bam)
+  printf "%s\t%s\n" $name $readcount >> "../public_data/H3K27ac/read_counts.txt"
+done
+> "../processed_data/ChIPseq/bam/read_counts.txt"
+bam_files=$(find '../processed_data/ChIPseq/bam' -iname '*H3K27ac*.bam')
+for file in $bam_files; do
+  readcount=$(samtools idxstats $file | awk '{s+=$3}END{print s}')
+  name=$(basename $file .bam)
+  printf "%s\t%s\n" $name $readcount >> "../processed_data/ChIPseq/bam/read_counts.txt"
+done
+```
+
+## Sample Information
+```{r si, eval=T}
+regions <- list("benc_mm" = import.bed("../public_data/myc_enhancers/benc_enh_mm10.bed"),
+                "benc_hs" = import.bed("../public_data/myc_enhancers/benc_enh_hg38.bed"),
+                "enh_mm" = import.bed("../public_data/myc_enhancers/myc_enhancerome_regions.mm10.bed"),
+                "enh_hs" = import.bed("../public_data/myc_enhancers/myc_enhancerome_regions_hg38.bed"))
+reg_remove <- c("Facial_morpho_region1","ccRCC_region","AML_region1","Breast_enh_region1",
+                "MCC_region1","AML_region2","Glioma_region1","AML_region3","Prostate_enh_region3")
+regions$enh_mm <- regions$enh_mm[!regions$enh_mm$name %in% reg_remove, ]
+regions$enh_mm <- c(regions$enh_mm, regions$benc_mm[1,])
+end(regions$enh_mm)[regions$enh_mm$name=="Neuroblastoma_region2"] <- start(regions$enh_mm[regions$enh_mm$name=="BENC_enhancer"]) - 50
+start(regions$enh_mm)[regions$enh_mm$name=="Bcell_enh_region1"] <- end(regions$enh_mm[regions$enh_mm$name=="Prostate_enh_region2"]) + 50
+regions$enh_mm$name <- gsub("_enh_", "_", regions$enh_mm$name)
+regions$enh_hs <- regions$enh_hs[!regions$enh_hs$name %in% reg_remove, ]
+regions$enh_hs <- c(regions$enh_hs, regions$benc_hs[1,])
+end(regions$enh_hs)[regions$enh_hs$name=="Neuroblastoma_region2"] <- start(regions$enh_hs[regions$enh_hs$name=="BENC_enhancer"]) - 50
+start(regions$enh_hs)[regions$enh_hs$name=="Bcell_enh_region1"] <- end(regions$enh_hs[regions$enh_hs$name=="Prostate_enh_region2"]) + 50
+regions$enh_hs$name <- gsub("_enh_", "_", regions$enh_hs$name)
+saveRDS(regions, "Myc_enh_regions_granges.rds")
+hs_si <- read.delim("../public_data/H3K27ac/metadata.txt") %>%
+  mutate(path = paste0("../public_data/H3K27ac/", file_id, ".bam"))
+hs_counts <- read.delim("../public_data/H3K27ac/read_counts.txt", header = F, 
+                        col.names=c("file_id","count"))
+hs_si$read_sum <- hs_counts[match(hs_si$file_id,
+                                  hs_counts$file_id),]$count
+mm_files <- list.files("../processed_data/ChIPseq/bam", "H3K27ac_.+bam$", full.names = T)
+pattern <- ".+bam/(.+(Cre|ERT2)_(Ikzf13_(KO|WT))_.+_r[0-9])\\.bam"
+mm_si <- data.frame(file_id = sub(pattern, "\\1", mm_files),
+                    sample_name = sub(pattern, "\\2_\\3", mm_files),
+                    path = mm_files)
+mm_counts <- read.delim("../processed_data/ChIPseq/bam/read_counts.txt", header = F,
+                        col.names=c("file_id","count"))
+mm_si$read_sum <- mm_counts[match(mm_si$file_id, mm_counts$file_id),]$count
+```
+
+## Quantify enhancer usage - human
+```{r quant_enh_hs, eval=F, message=F}
+enh_counts <- apply(hs_si, 1, function(x) {
+  if (!file.exists(x[["path"]])) return(NULL)
+  tmp <- bamCount(x[["path"]], regions$benc_hs)
+  tmp <- tmp / (as.numeric(x[["read_sum"]]) / 10^6)
+  tmp <- tmp / (width(regions$benc_hs)/1000)
+  names(tmp) <- regions$benc_hs$name
+  df <- as.data.frame(t(tmp))
+  df$file_id <- x[["file_id"]]
+  return(df)
+}) %>% bind_rows()
+hs_df <- merge(hs_si, enh_counts, by = "file_id") %>%
+  mutate(sample_group = factor(sample_group, levels = rev(unique(hs_si$sample_group))))
+saveRDS(hs_df, "../processed_data/ChIPseq/BENC_enh_H3K27ac_RPM_Hs.rds")
+enh_counts <- apply(hs_si, 1, function(x) {
+  if (!file.exists(x[["path"]])) return(NULL)
+  tmp <- bamCount(x[["path"]], regions$enh_hs)
+  tmp <- tmp / (as.numeric(x[["read_sum"]]) / 10^6)
+  tmp <- tmp / (width(regions$enh_hs)/1000)
+  names(tmp) <- regions$enh_hs$name
+  df <- as.data.frame(t(tmp))
+  df$file_id <- x[["file_id"]]
+  return(df)
+}) %>% bind_rows()
+hs_df <- merge(hs_si, enh_counts, by = "file_id") %>%
+  mutate(sample_group = factor(sample_group, levels = rev(unique(hs_si$sample_group))))
+saveRDS(hs_df, "../processed_data/ChIPseq/Enhancerome_H3K27ac_RPM_Hs.rds")
+```
+
+## Quantify enhancer usage - mouse
+```{r quant_enh_mm, eval=F, message=F}
+enh_counts <- apply(mm_si, 1, function(x) {
+  if (!file.exists(x[["path"]])) return(NULL)
+  tmp <- bamCount(x[["path"]], regions$benc_mm)
+  tmp <- tmp / (as.numeric(x[["read_sum"]]) / 10^6)
+  tmp <- tmp / (width(regions$benc_mm)/1000)
+  names(tmp) <- regions$benc_mm$name
+  df <- as.data.frame(t(tmp))
+  df$file_id <- x[["file_id"]]
+  return(df)
+}) %>% bind_rows()
+mm_df <- merge(mm_si, enh_counts, by = "file_id") %>%
+  mutate(sample_name = factor(sample_name, levels = unique(mm_si$sample_name)))
+saveRDS(mm_df, "../processed_data/ChIPseq/BENC_enh_H3K27ac_RPM_Mm.rds")
+enh_counts <- apply(mm_si, 1, function(x) {
+  if (!file.exists(x[["path"]])) return(NULL)
+  tmp <- bamCount(x[["path"]], regions$enh_mm)
+  tmp <- tmp / (as.numeric(x[["read_sum"]]) / 10^6)
+  tmp <- tmp / (width(regions$enh_mm)/1000)
+  names(tmp) <- regions$enh_mm$name
+  df <- as.data.frame(t(tmp))
+  df$file_id <- x[["file_id"]]
+  return(df)
+}) %>% bind_rows()
+mm_df <- merge(mm_si, enh_counts, by = "file_id") %>%
+  mutate(sample_name = factor(sample_name, levels = unique(mm_si$sample_name)))
+saveRDS(mm_df, "../processed_data/ChIPseq/Enhancerome_H3K27ac_RPM_Mm.rds")
+```
+
+## Plot heatmaps
+```{r plot_hm, warning=F, message=F, fig.height=5, fig.width=7.5}
+pptx <- read_pptx()
+hs_benc <- readRDS("../processed_data/ChIPseq/BENC_enh_H3K27ac_RPM_Hs.rds")
+hs_enh <- readRDS("../processed_data/ChIPseq/Enhancerome_H3K27ac_RPM_Hs.rds")
+regions <- readRDS("Myc_enh_regions_granges.rds")
+p1 <- hs_enh %>%
+  select_if(grepl("sample_group|_region|_enhancer", colnames(.))) %>%
+  gather("element", "rpm", -1) %>%
+  group_by(sample_group) %>%
+  mutate(element = factor(element, levels=unique(element))) %>%
+  group_by(sample_group, element) %>%
+  mutate(rpm = mean(rpm)) %>%
+  ggplot(aes(x = element, y = sample_group, fill = rpm)) +
+  geom_tile() +
+  scale_x_discrete(expand=c(0,0), name = "Enhancer element", position = "top") +
+  scale_y_discrete(expand=c(0,0)) +
+  scale_fill_gradient(low="white", high="firebrick4", name = "RPM") +
+  theme_bw(base_size = 12) +
+  theme(panel.background = element_blank(), 
+        panel.border = element_rect(fil=NA, color="black"),
+        panel.grid = element_blank(),
+        axis.ticks = element_blank(),
+        axis.title.y = element_blank(),
+        axis.text.x = element_text(angle=45, hjust=0, vjust=0.5),
+        legend.position = "none")
+p2 <- hs_benc %>%
+  select("sample_group","A","B","C","D","F","G","H","I") %>%
+  gather("element", "rpm", -1) %>%
+  group_by(sample_group) %>%
+  mutate(rpm = scale(rpm)) %>%
+  group_by(sample_group, element) %>%
+  mutate(rpm = mean(rpm)) %>%
+  ggplot(aes(x = element, y = sample_group, fill = rpm)) +
+  geom_tile() +
+  scale_x_discrete(expand=c(0,0), position = "top", name = "BENC element") +
+  scale_y_discrete(expand=c(0,0)) +
+  scale_fill_gradient(low="white", high="firebrick4", name = "RPM") +
+  theme_bw(base_size = 12) +
+  theme(panel.background = element_blank(), 
+        panel.border = element_rect(fil=NA, color="black"),
+        panel.grid = element_blank(),
+        axis.ticks = element_blank(),
+        axis.title.y = element_blank(),
+        axis.text.y = element_blank())
+cp <- cowplot::plot_grid(p1,p2, nrow=1, align="vh", rel_widths=c(1,0.6))
+add_slide(pptx, layout = "Title and Content", master = "Office Theme") %>%
+  ph_with(value = dml(ggobj = cp),
+          location = ph_location(height = 5, width = 7.5,
+                                 left = 1, top = 1),
+          bg = "transparent")
+cp
+```
+
+## Plot bargraph
+```{r plot_bg, fig.height=5, fig.width=7.25}
+mm_benc <- readRDS("../processed_data/ChIPseq/BENC_enh_H3K27ac_RPM_Mm.rds")
+mm_enh <- readRDS("../processed_data/ChIPseq/Enhancerome_H3K27ac_RPM_Mm.rds")
+regions <- readRDS("Myc_enh_regions_granges.rds")
+p1 <- mm_benc %>%
+  select("sample_name","A","B","C","D","E","F","G","H","I") %>%
+  gather("element", "rpm", -1) %>%
+  group_by(sample_name, element) %>%
+  mutate(mean_rpm = mean(rpm),
+         upper = max(rpm),
+         lower = min(rpm)) %>%
+  ggplot(aes(x = element, fill = sample_name)) +
+  geom_bar(aes(y = mean_rpm), stat = "identity", position = position_dodge()) +
+  geom_errorbar(aes(ymin=lower, ymax=upper), width=.4, position=position_dodge(.9)) +
+  scale_fill_manual(values=c("#225511AA","#991111AA","#22551144","#99111144"),
+                    name="") +
+  xlab("BENC enhancer element") +
+  ylab("H3K27ac signal (RPM)") +
+  theme_bw(base_size = 12) +
+  theme(panel.background = element_blank(), 
+        panel.border = element_rect(fil=NA, color="black"),
+        panel.grid = element_blank())
+p2 <- mm_enh %>%
+  select_if(grepl("sample_name|_region|_enhancer", colnames(.))) %>%
+  gather("element", "rpm", -1) %>%
+  group_by(sample_name) %>%
+  mutate(element = factor(element, levels=unique(element)),
+         sample_name = factor(sample_name, levels = rev(levels(sample_name)))) %>%
+  group_by(sample_name, element) %>%
+  mutate(rpm = mean(rpm)) %>%
+  ggplot(aes(x = element, y = sample_name, fill = rpm)) +
+  geom_tile() +
+  scale_x_discrete(expand=c(0,0), name = "Enhancer element") +
+  scale_y_discrete(expand=c(0,0)) +
+  scale_fill_gradient(low="white", high="firebrick4", name = "RPM") +
+  theme_bw(base_size = 12) +
+  theme(panel.background = element_blank(), 
+        panel.border = element_rect(fil=NA, color="black"),
+        panel.grid = element_blank(),
+        axis.ticks = element_blank(),
+        axis.title.y = element_blank(),
+        axis.text.x = element_text(angle=45, hjust=1))
+p3 <- mm_enh %>%
+  select("sample_name","BENC_enhancer") %>%
+  gather("element", "rpm", -1) %>%
+  group_by(sample_name) %>%
+  mutate(mean_rpm = mean(rpm),
+         upper = max(rpm),
+         lower = min(rpm)) %>%
+  ggplot(aes(x = sample_name, y = mean_rpm, fill = sample_name)) +
+  geom_bar(stat="identity", position=position_dodge()) +
+  geom_errorbar(aes(ymin=lower, ymax=upper), width=.4, position=position_dodge(.9)) +
+  scale_fill_manual(values=c("#225511AA","#991111AA","#22551144","#99111144"),
+                    name="") +
+  xlab("") + ylab("H3K27ac signal (RPM)") +
+  theme_bw(base_size = 12) +
+  theme(panel.background = element_blank(), 
+        panel.border = element_rect(fil=NA, color="black"),
+        panel.grid = element_blank(),
+        axis.text.x = element_blank(),
+        axis.ticks.x = element_blank())
+add_slide(pptx, layout = "Title and Content", master = "Office Theme") %>%
+  ph_with(value = dml(ggobj = p3),
+          location = ph_location(height = 3, width = 3,
+                                 left = 1, top = 1),
+          bg = "transparent")
+cp <- cowplot::plot_grid(p1, p2, nrow=2)
+add_slide(pptx, layout = "Title and Content", master = "Office Theme") %>%
+  ph_with(value = dml(ggobj = cp),
+          location = ph_location(height = 5, width = 7.25,
+                                 left = 1, top = 1),
+          bg = "transparent")
+print(pptx, "../img/BENC_enhancer_usage_plots.pptx")
+cp
+
+mm_enh %>%
+  select_if(grepl("sample_name|_region|_enhancer", colnames(.))) %>%
+  gather("element", "rpm", -1) %>%
+  group_by(sample_name) %>%
+  mutate(element = factor(element, levels=unique(element)),
+         sample_name = factor(sample_name, levels = rev(levels(sample_name))),
+         region_length = width(regions$enh_mm)[match(element,regions$enh_mm$name)]) %>%
+  group_by(sample_name, element) %>%
+  mutate(rpm = mean(rpm)) %>%
+  # mutate(rpm = ifelse(rpm > 1, 1, rpm)) %>%
+  ggplot(aes(x = element, y = sample_name, fill = rpm)) +
+  geom_tile() +
+  scale_x_discrete(expand=c(0,0), name = "Enhancer element") +
+  scale_y_discrete(expand=c(0,0)) +
+  scale_fill_gradient(low="white", high="steelblue", name = "RPM") +
+  theme_bw(base_size = 12) +
+  theme(panel.background = element_blank(), 
+        panel.border = element_rect(fil=NA, color="black"),
+        panel.grid = element_blank(),
+        axis.ticks = element_blank(),
+        axis.title.y = element_blank(),
+        axis.text.x = element_text(angle=45, hjust=1))
+```

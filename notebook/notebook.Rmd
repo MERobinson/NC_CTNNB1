@@ -1,0 +1,479 @@
+--- 
+title: "NC CTNNB1 project - Nehir Cosgun"
+author: "Mark Robinson"
+date: "`r Sys.Date()`"
+site: bookdown::bookdown_site
+documentclass: book
+bibliography: [book.bib, packages.bib]
+biblio-style: nature
+link-citations: yes
+---
+
+# Project Overview
+...placeholder...
+
+```{r include=TRUE}
+# automatically create a bib database for R packages
+knitr::write_bib(c('DESeq2','tximport','fgsea'), 'packages.bib')
+```
+
+<!--chapter:end:index.Rmd-->
+
+# Ikaros KO/Bcat GOF DE
+
+## Background
+
+To identify genes mis-regulated by beta-catenin (bcat) in an Ikaros-dependent manner, RNA-seq was performed on pre-B cells from CTNNB1^Ex3fl mice that allow inducible bcat gain-of-function (GOF) with addition of Cre. Both GOF and control cells were additionally transfected with sgRNA targetting Ikzf1 and Ikzf3, or not targetting control (NTC) guides.
+
+## Setup
+```{r ikgof_de_setup, warning=F, message=F}
+# load libraries
+library(tidyverse)
+library(tximport)
+library(DESeq2)
+library(openxlsx)
+library(DT)
+library(EnsDb.Mmusculus.v79)
+txdb <- EnsDb.Mmusculus.v79
+  
+# make tx2gene
+k <- keys(txdb, keytype = "TXID")
+tx2gene <- select(txdb, k, "GENEID", "TXID")
+```
+
+## Sample Info
+```{r ikgof_smi, warning=T, message=T}
+files <- list.files("../processed_data/RNAseq/IkKO_bcatGOF_salmon", pattern = "quant.sf", 
+                    recursive = T, full.names = T)
+pattern <- "^.+/Ctnnb1\\-GOF_(cre|ert2)\\-(NTC|Ikzf1\\-3\\-KO)\\-([0-9])/quant.sf$"
+smi <- data.frame(sample_id = NA,
+                  treatment = sub(pattern, "\\1", files),
+                  condition = sub(pattern, "\\2", files),
+                  replicate = sub(pattern, "\\3", files)) %>%
+  mutate(condition = factor(condition, 
+                            levels = c("NTC","Ikzf1-3-KO"),
+                            labels = c("NTC","IkKO")),
+         treatment = factor(treatment, 
+                            levels = c("ert2","cre"),
+                            labels = c("ERT2","CreERT2")),
+         combined = paste0(condition, "_", treatment),
+         sample_id = paste0(combined, "_r", replicate),
+         path = files) %>%
+  dplyr::select(1:3,5,4,6)
+names(files) <- smi$sample_id
+smi %>% arrange(sample_id) %>% 
+  DT::datatable(escape  = F, rownames = F,
+                colnames = c("Sample ID", "Treatment", "Condition", "Combined", "Replicate", "File Path"),
+                options = list(
+                  scrollX = TRUE,
+                  columnDefs = list(list(
+                        targets = 5,
+                        render = JS(
+                          "function(data, type, row, meta) {",
+                          "return type === 'display' && data.length > 35 ?",
+                          "'<span title=\"' + data + '\">' + data.substr(0, 35) + '...</span>' : data;",
+                          "}")))
+                ), callback = JS('table.page(3).draw(false);'))
+```
+
+## Differential Expression
+
+- Note 2021-03-05 MER: changed method here vs original analysis on 2020-09-29 to include lfcShrinkage in order to adjust L2FC estimates for low-abundance genes. Majority of changes remain unchanged but some previous outliers such as Brca2 have been substantially decreased.
+
+```{r ikgof_de, warning=F, message=F, eval=F}
+txi <- tximport(files, type = "salmon", tx2gene = tx2gene, ignoreTxVersion = T)
+dds <- DESeqDataSetFromTximport(txi, colData = smi,
+                                design = ~combined)
+dds <- dds[rowMeans(counts(dds)) > 5, ]
+dds <- DESeq(dds)
+contrasts <- list(NTC_Cre_vs_NTC_ERT2 = "NTC_CreERT2_vs_NTC_ERT2",
+                  Ik_Cre_vs_Ik_ERT2 = "IkKO_CreERT2_vs_IkKO_ERT2",
+                  Ik_ERT2_vs_NTC_ERT2 = "IkKO_ERT2_vs_NTC_ERT2",
+                  Ik_Cre_vs_NTC_Cre = "IkKO_CreERT2_vs_NTC_CreERT2")
+deres <- lapply(contrasts, function(contrast) {
+  a <- sub("^(.+)_vs_(.+)$", "\\1", contrast) 
+  b <- sub("^(.+)_vs_(.+)$", "\\2", contrast)
+  res <- results(dds, contrast=c("combined", a, b))
+  lfcShrink(dds, contrast = c("combined", a, b), 
+            res = res, type = "normal")
+})
+dds2 <- DESeqDataSetFromTximport(txi, colData = smi,
+                                design = ~treatment+condition+treatment:condition)
+dds2 <- dds2[rowMeans(counts(dds2)) > 5, ]
+dds2 <- DESeq(dds2)
+deres$Cre_Ik_interaction <- results(dds2, name = "treatmentCreERT2.conditionIkKO")
+deres$Cre_Ik_interaction <- lfcShrink(dds2, contrast = "treatmentCreERT2.conditionIkKO",
+                                      res = deres$Cre_Ik_interaction, type = "ashr")
+```
+
+## Annotate and tidy
+```{r ikgof_anno, warning=F, message=F, eval=F}
+rlog <- rlog(dds)
+genesymb <- mapIds(txdb, keys = rownames(deres[[1]]), 
+                   keytype = "GENEID", column = "SYMBOL")
+deanno <- data.frame(gene_symbol = genesymb,
+                    ensembl_id = rownames(deres[[1]]),
+                    L2FC_NTC_Cre_vs_NTC_ERT2 = deres$NTC_Cre_vs_NTC_ERT2$log2FoldChange,
+                    L2FC_Ik_Cre_vs_Ik_ERT2 = deres$Ik_Cre_vs_Ik_ERT2$log2FoldChange,
+                    L2FC_Ik_ERT2_vs_NTC_ERT2 = deres$Ik_ERT2_vs_NTC_ERT2$log2FoldChange,
+                    L2FC_Ik_Cre_vs_NTC_Cre = deres$Ik_Cre_vs_NTC_Cre$log2FoldChange,
+                    L2FC_Cre_Ik_interaction = deres$Ik_Cre_vs_Ik_ERT2$log2FoldChange - deres$NTC_Cre_vs_NTC_ERT2$log2FoldChange,
+                    padj_NTC_Cre_vs_NTC_ERT2 = deres$NTC_Cre_vs_NTC_ERT2$padj,
+                    padj_Ik_Cre_vs_Ik_ERT2 = deres$Ik_Cre_vs_Ik_ERT2$padj,
+                    padj_Ik_ERT2_vs_NTC_ERT2 = deres$Ik_ERT2_vs_NTC_ERT2$padj,
+                    padj_Ik_Cre_vs_NTC_Cre = deres$Ik_Cre_vs_NTC_Cre$padj,
+                    padj_Cre_Ik_interaction = deres$Cre_Ik_interaction$padj,
+                    av_expr = rowMeans(assay(rlog)),
+                    av_NTC_ERT2 = rowMeans(assay(rlog)[,grep("NTC_ERT2", colnames(rlog))]),
+                    av_NTC_Cre = rowMeans(assay(rlog)[,grep("NTC_CreERT2", colnames(rlog))]),
+                    av_IkKO_ERT2 = rowMeans(assay(rlog)[,grep("IkKO_ERT2", colnames(rlog))]),
+                    av_IkKO_Cre = rowMeans(assay(rlog)[,grep("IkKO_CreERT2", colnames(rlog))]))
+deanno <- cbind(deanno, assay(rlog))
+write.xlsx(deanno, "../results/IkKO_bcatGOF_DE.2021-03-05.xlsx", firstRow = TRUE, firstCol = TRUE) 
+saveRDS(deanno, "../processed_data/RNAseq/IkKO_bcatGOF_DE.2021-03-05.rds")
+```
+
+```{r ikgof_summarise_de}
+deanno <- readRDS("../processed_data/RNAseq/IkKO_bcatGOF_DE.2021-03-05.rds")
+contrasts <- list(NTC_Cre_vs_NTC_ERT2 = "NTC_Cre_vs_NTC_ERT2",
+                  Ik_Cre_vs_Ik_ERT2 = "Ik_Cre_vs_Ik_ERT2",
+                  Ik_ERT2_vs_NTC_ERT2 = "Ik_ERT2_vs_NTC_ERT2",
+                  Ik_Cre_vs_NTC_Cre = "Ik_Cre_vs_NTC_Cre",
+                  Cre_Ik_interaction = "Cre_Ik_interaction")
+lapply(contrasts, function(x) {
+  deanno[, grep(x, colnames(deanno))] %>% 
+    dplyr::filter(.[,2] < 0.05) %>%
+    summarise(condition = x,
+              upreg = nrow(.[.[,1] > 0.58, ]),
+              dnreg = nrow(.[.[,1] < -0.58, ]))
+}) %>% bind_rows() %>% kableExtra::kable()
+```
+
+```{r ikgof_detable}
+deanno %>% 
+  dplyr::filter(padj_Cre_Ik_interaction < 0.05) %>%
+  dplyr::arrange(padj_Cre_Ik_interaction) %>%
+  dplyr::select(1,7,12,14:17) %>%
+  dplyr::mutate_at(2, function(x) round(x, 3)) %>%
+  dplyr::mutate_at(4:7, function(x) round(x, 2)) %>%
+  dplyr::mutate_at(3, function(x) formatC(x, format = "e", digits = 3)) %>%
+  DT::datatable(escape  = F, rownames = F,
+                options = list(
+                  columnDefs = list(list(className = 'dt-right', targets = 2)),
+                  scrollX = TRUE))
+```
+
+## Volano plot
+```{r ikgof_volcano, warning=F, message=F, fig.width=8, fig.height=8}
+plotdat <- lapply(contrasts, function(contrast) {
+  x <- deanno[, c(1,grep(contrast, colnames(deanno)))]
+  colnames(x)[2:3] <- c("L2FC", "qval")
+  x$col <- "B"
+  x[which(x$qval < 0.05 & x$L2FC > 0.58),]$col <- "A"
+  x[which(x$qval < 0.05 & x$L2FC < -0.58),]$col <- "C"
+  if (any(x$qval < 1e-100, na.rm = T)) x[which(x$qval<1e-100),]$qval <- 1e-100
+  topg <- top_n(x, 50, -qval)$gene_symbol
+  x$label <- ifelse(x$gene_symbol %in% c(topg) & x$qval < 1e-10,
+                    x$gene_symbol, "")
+  x$comparison <- contrast
+  return(x)
+}) %>% bind_rows()
+(p <- ggplot(plotdat, aes(x = L2FC, y = -log10(qval))) +
+  geom_hline(yintercept = -log10(0.01), color = "firebrick", alpha = .2, lty=2) +
+  geom_vline(xintercept = 0, color = "firebrick", alpha = .2, lty=2) +
+  geom_point(aes(col=col), alpha = .5, size=1) +
+  ggrepel::geom_text_repel(aes(label = label)) +
+  facet_wrap(~comparison, nrow = 3, scales = "free_y") +
+  scale_color_manual(values = c("firebrick4","grey40","steelblue4")) +
+  scale_x_continuous(name = "Fold change (log2)") +
+  scale_y_continuous(name = "Significance (-log10 p-value)") +
+  theme(text = element_text(size = 14, color = "black", family = "Arial"),
+        axis.text = element_text(size = 11, color = "black", family = "Arial"),
+        panel.grid = element_blank(),
+        panel.background = element_blank(),
+        panel.border = element_rect(color = "black", fill = NA),
+        strip.background = element_blank(), 
+        strip.text = element_text(size = 12, color = "black", family = "Arial"), 
+        legend.position = "none"))
+```
+
+## Full GSEA 
+
+Note: This analysis was run on all REACTOME, KEGG, MSigDB Hallmark, and WIKIPATHWAY database gene sets (with some minor filtering for irrelevant sets). This is useful for data exploration but will inflate q-value/padj simply due to the large number of tests performed, hence these results should be used to identify potentially interesting pathways before performing more selective enrichment testing for more appropriate statistical values.
+
+```{r dr_gseafull, warning=F}
+library(msigdbr)
+library(fgsea)
+msig <- rbind(msigdbr(species = "Mus musculus", category = "H"),
+              msigdbr(species = "Mus musculus", category = "C2", subcategory = "CP:REACTOME"),
+              msigdbr(species = "Mus musculus", category = "C2", subcategory = "CP:KEGG"),
+              msigdbr(species = "Mus musculus", category = "C2", subcategory = "CP:WIKIPATHWAYS")) 
+gs <- split(msig$gene_symbol, msig$gs_name)
+internal_gs <- readRDS("../../resources/internal_genesets_Mm.rds")
+gs <- c(gs, internal_gs)
+gs <- gs[!grepl(paste0("sperm|xeno|graft|naba|spinal|neuro|sclerosis",
+                       "|tion_of_hscs|photo|leish|diabetes|lupus|ebola",
+                       "|staph|syndrome|myo|nicotin|asthma|thyroid_stim",
+                       "|gastrin|alcohol|nutrient|carcinoma|muscle_contr",
+                       "|metapathway|amyloid|fusion_mutants|circadian"),
+                names(gs), ignore.case = T)]
+gl <- lapply(contrasts, function(contrast) {
+  tmp <- deanno[,grep(contrast, colnames(deanno))]
+  colnames(tmp) <- c("L2FC","qval")
+  tmp <- (tmp$L2FC * (-log10(tmp$qval+1e-50)/10))
+  names(tmp) <- deanno$gene_symbol
+  tmp <- tmp[!is.na(names(tmp)) & names(tmp) != "" & !is.na(tmp) & is.finite(tmp)]
+  tmp <- tmp[order(-tmp)]
+  tmp[!duplicated(names(tmp))]
+})
+gseres <- lapply(gl, function(x) {
+  fgseaSimple(pathways = gs, stats = x, 
+              nperm = 1000, minSize = 10, maxSize = 500) %>%
+    dplyr::filter(lengths(leadingEdge) > 3) %>%
+    arrange(pval)
+})
+wb <- createWorkbook()
+lapply(contrasts, function(contrast) {
+  gse <- as.data.frame(gseres[[contrast]])
+  addWorksheet(wb, sheetName = contrast)
+  writeData(wb, gse, sheet = contrast, rowNames = F)
+  freezePane(wb, sheet = contrast, firstRow = TRUE, firstCol = TRUE)
+  return(NULL)
+})
+saveWorkbook(wb, "../results/IkKO_bcatGOF_DE_fullGSEA.2021-03-05.xlsx", overwrite = T)
+lapply(contrasts, function(x) {
+  tmp <- gseres[[x]] %>% dplyr::filter(pval < 0.5) %>% dplyr::select(pathway, NES)
+  tmp[,2] <- round(tmp[,2], 3)
+  colnames(tmp)[2] <- x
+  return(tmp) }) %>% 
+  Reduce(f = function(x,y) { merge(x, y, by="pathway") }) %>%
+  arrange(Cre_Ik_interaction) %>%
+  mutate(pathway = ifelse(pathway %in% names(internal_gs), pathway,
+                          paste0('<a href=https://www.gsea-msigdb.org/gsea/msigdb/cards/', 
+                                 pathway, '.html>', substr(pathway, 0,30), '</a>'))) %>%
+  DT::datatable(escape  = F, rownames = F,
+                options = list(
+                  scrollX = TRUE))
+```
+
+## Select GSEA
+```{r dr_poi}
+poi <- c("HALLMARK_MYC_TARGETS_V1","HALLMARK_MYC_TARGETS_V2",
+         "REACTOME_DEATH_RECEPTOR_SIGNALLING",
+         "REACTOME_MITOTIC_G1_PHASE_AND_G1_S_TRANSITION",
+         "HALLMARK_KRAS_SIGNALING_UP",
+         "REACTOME_SIGNALING_BY_NOTCH",
+         "Cosgun_Bcatenin_GOF_UP",
+         "Schjerven_Ikzf1_KO_UP",
+         "GSE73238_CD8_TcfLefDKO_UP")
+```
+
+```{r dr_gseasub, warning=F, eval=F}
+gsub <- gs[names(gs) %in% poi]
+gseres <- lapply(gl, function(x) {
+  fgseaSimple(pathways = gsub, stats = x, 
+              nperm = 10000, minSize = 10, maxSize = 500) %>%
+    arrange(pval)
+})
+saveRDS(gseres, "../processed_data/RNAseq/IkKO_bcatGOF_DE_subGSEA.2021-03-05.rds")
+wb <- createWorkbook()
+lapply(names(gseres), function(contrast) {
+  gse <- as.data.frame(gseres[[contrast]])
+  addWorksheet(wb, sheetName = contrast)
+  writeData(wb, gse, sheet = contrast, rowNames = F)
+  freezePane(wb, sheet = contrast, firstRow = TRUE, firstCol = TRUE) 
+  return(gse)
+})
+saveWorkbook(wb, "../results/IkKO_bcatGOF_DE_subGSEA.2021-03-05.xlsx", overwrite = T)
+```
+
+```{r dr_gseasub_table, warning=F, fig.width=8, fig.height=7}
+gseres <- readRDS("../processed_data/RNAseq/IkKO_bcatGOF_DE_subGSEA.2021-03-05.rds")
+int_levels <- gseres$Cre_Ik_interaction %>% arrange(-NES) %>% .$pathway
+lapply(names(gseres), function(x) {
+  gseres[[x]] %>% 
+    mutate(pvaltxt = ifelse(padj < 0.001, "***", 
+                            ifelse(padj < 0.01, "**",
+                              ifelse(padj < 0.05, "*", "-"))),
+           cond = x, 
+           score = -log10(padj)*NES) %>%
+    dplyr::select(pathway, score, pvaltxt, cond) }) %>% 
+  bind_rows() %>% 
+  mutate(cond=factor(cond, levels=unique(cond)),
+         pathway = factor(pathway, levels=int_levels)) %>%
+  ggplot(aes(x=cond, y=pathway, fill=score, label=pvaltxt)) +
+  geom_tile() +
+  geom_text() +
+  scale_x_discrete(expand=c(0,0), name="") +
+  scale_y_discrete(expand=c(0,0), name="") + 
+  scale_fill_gradient2(low="steelblue4", mid="white", high="firebrick4") +
+  theme_bw(base_size = 12, base_family = "Arial") +
+  theme(panel.background = element_blank(),
+        panel.border = element_rect(color="black", fill=NA),
+        axis.text.x = element_text(angle=45, hjust=1),
+        axis.ticks = element_blank(),
+        legend.position = "none")
+```
+
+## GSEA plots
+```{r dr_gseasub_plots, warning=F, message=F, eval=T, fig.width=8, fig.height=3.5}
+source("../../resources/fsea.R")
+library(rvg)
+library(officer)
+library(cowplot)
+ppt <- read_pptx()
+pl <- lapply(poi, function(path) {
+  pathplots <- lapply(names(gseres), function(contrast) {
+    plot_fgsea(gseres[[contrast]], gl[[contrast]], gs, path) + 
+      ggtitle(contrast) + 
+    theme(plot.title = element_text(size=10))
+  })
+  title <- ggdraw() + draw_label(path)
+  combined <- plot_grid(plotlist = pathplots, align = "vh", ncol = 3)
+  p <- plot_grid(title, combined, ncol = 1, rel_heights = c(0.05, 1))
+  add_slide(x = ppt, layout = "Title and Content", master = "Office Theme") %>%
+    ph_with(value = dml(ggobj = p),
+            location = ph_location(height = 3.5, width = 9,
+                                   left = 0.25, top = 0.5),
+            bg = "transparent")
+  return(p)
+})
+names(pl) <- poi
+print(ppt, target="../img/IkKO_bcatGOF_DE_GSEAplots.2021-03-05.pptx")
+pl$HALLMARK_MYC_TARGETS_V1
+```
+
+<!-- ## Gene set heatmaps -->
+<!-- ```{r} -->
+<!-- # function to generate pptx -->
+<!-- library(rvg) -->
+<!-- library(officer) -->
+<!-- gen_pptx <- function(plot, file, height = 5, width = 5, left = 1, top = 1) { -->
+<!--   read_pptx() %>% -->
+<!--     add_slide(layout = "Title and Content", master = "Office Theme") %>% -->
+<!--     ph_with(value = dml(ggobj = plot), -->
+<!--             location = ph_location(height = height, width = width, -->
+<!--                                    left = left, top = top), -->
+<!--             bg = "transparent") %>% -->
+<!--     print(target = file) -->
+<!-- } -->
+
+<!-- # plots -->
+<!-- myc_expr <- deanno %>% -->
+<!--   dplyr::filter(padj_Cre_Ik_interaction < 1e-3 &  -->
+<!--                 L2FC_Cre_Ik_interaction < -0.25 & -->
+<!--                 L2FC_NTC_Cre_vs_NTC_ERT2 > 0.4 & -->
+<!--                 !gene_symbol %in% c("Pdzd2","Sbk1","Gm5537")) %>% -->
+<!--   arrange(-L2FC_Cre_Ik_interaction) -->
+<!-- wtexpr <- myc_expr[, c(1,grep("^NTC_ERT2", colnames(deanno)), -->
+<!--                             grep("^NTC_CreERT2", colnames(deanno)))] %>% -->
+<!--   gather("sample","val",-1) %>% -->
+<!--   group_by(gene_symbol) %>% -->
+<!--   mutate(gene_symbol = factor(gene_symbol, levels=myc_expr$gene_symbol), -->
+<!--          sample = factor(sample, levels = unique(sample)), -->
+<!--          scaled = val - mean(val)) -->
+<!-- ikexpr <- myc_expr[, c(1,grep("^IkKO_ERT2", colnames(deanno)), -->
+<!--                             grep("^IkKO_CreERT2", colnames(deanno)))] %>% -->
+<!--   gather("sample","val",-1) %>% -->
+<!--   group_by(gene_symbol) %>% -->
+<!--   mutate(gene_symbol = factor(gene_symbol, levels=myc_expr$gene_symbol), -->
+<!--          sample = factor(sample, levels = unique(sample)), -->
+<!--          scaled = val - mean(val)) -->
+<!-- lims <- c(min(c(ikexpr$scaled, wtexpr$scaled)), -->
+<!--           max(c(ikexpr$scaled, wtexpr$scaled))) -->
+<!-- (a <- ggplot(wtexpr, aes(x = sample, y = gene_symbol, fill = scaled)) + -->
+<!--   geom_tile() + -->
+<!--   scale_y_discrete(expand=c(0,0)) + -->
+<!--   scale_x_discrete(expand=c(0,0)) + -->
+<!--   scale_fill_gradientn(colours = c("steelblue4","white","firebrick4"),  -->
+<!--                        limits = lims) + -->
+<!--   theme(panel.background = element_blank(), -->
+<!--         panel.border = element_rect(color="black",fill=NA), -->
+<!--         axis.title = element_blank(), -->
+<!--         axis.ticks = element_blank(), -->
+<!--         axis.text.x = element_text(angle=45,hjust=1))) -->
+<!-- (b <- ggplot(ikexpr, aes(x = sample, y = gene_symbol, fill = scaled)) + -->
+<!--     geom_tile() + -->
+<!--     scale_y_discrete(expand=c(0,0)) + -->
+<!--     scale_x_discrete(expand=c(0,0)) + -->
+<!--     scale_fill_gradientn(colours = c("steelblue4","white","firebrick4"),  -->
+<!--                          limits = lims) + -->
+<!--     theme(panel.background = element_blank(), -->
+<!--           panel.border = element_rect(color="black",fill=NA), -->
+<!--           axis.title = element_blank(), -->
+<!--           axis.ticks = element_blank(), -->
+<!--           axis.text.x = element_text(angle=45,hjust=1))) -->
+<!-- p <- cowplot::plot_grid(a,b, align="hv", nrow=1) -->
+<!-- gen_pptx(p, "../img/IkKO_BcatGOF_pos_int_genes_heatmap.pptx") -->
+<!-- ``` -->
+
+
+## Downloads
+- <a href="../results/IkKO_bcatGOF_DE.2021-03-05.xlsx" download>Differential expression results</a> (xlsx). 
+- <a href="../results/IkKO_bcatGOF_DE_fullGSEA.2021-03-05.xlsx" download>Full GSEA results</a> for exploratory analysis (xlsx). 
+- <a href="../results/IkKO_bcatGOF_DE_subGSEA.2021-03-05.xlsx" download>GSEA subset</a> for stats on selected pathways (xlsx).
+- <a href="../img/IkKO_bcatGOF_DE_GSEAplots.2021-03-05.pptx" download>GSEA plots</a> (vecotorised pptx).
+
+## Session info
+```{r sessioninfo}
+sessionInfo()
+```
+
+<!--chapter:end:2020-09-29_IkKO_GOF_DE.Rmd-->
+
+# Ikaros KO/Bcat GOF DE
+
+## Background
+
+To identify genes mis-regulated by beta-catenin (bcat) in an Ikaros-dependent manner, RNA-seq was performed on pre-B cells from CTNNB1^Ex3fl mice that allow inducible bcat gain-of-function (GOF) with addition of Cre. Both GOF and control cells were additionally transfected with sgRNA targetting Ikzf1 and Ikzf3, or not targetting control (NTC) guides.
+
+## Setup
+```{r dbde_setup, warning=F, message=F}
+library(tidyverse)
+library(openxlsx)
+library(DT)
+```
+
+## Load data
+```{r dbde_load}
+deres <- readRDS("../processed_data/RNAseq/IkKO_bcatGOF_DE.2021-03-05.rds")
+dbres <- read.csv("../processed_data/ChIPseq/Ctnnb1-GOF_Ikzf1-KO_DB_res.2021-03-02.csv")
+```
+
+## Combine
+```{r dbde_load}
+desub <- deres[match(dbres$ensemblID, deres$ensembl_id), 3:17]
+colnames(desub) <- paste0("Expr_", colnames(desub))
+dbcomb <- cbind(dbres[,c(5:6,1:4,7:17)], desub) %>% 
+  dplyr::filter(!is.na(Expr_av_expr)) %>%
+  arrange(Ctnnb1_qval)
+write.xlsx(dbcomb, "../results/IkKO_bcatGOF_DB_DE.2021-03-08.xlsx", firstCol=T, firstRow=T)
+```
+
+## Downloads
+- <a href="../results/IkKO_bcatGOF_DE.2021-03-05.xlsx" download>Differential expression results</a> (xlsx). 
+- <a href="../results/IkKO_bcatGOF_DE_fullGSEA.2021-03-05.xlsx" download>Full GSEA results</a> for exploratory analysis (xlsx). 
+- <a href="../results/IkKO_bcatGOF_DE_subGSEA.2021-03-05.xlsx" download>GSEA subset</a> for stats on selected pathways (xlsx).
+- <a href="../img/IkKO_bcatGOF_DE_GSEAplots.2021-03-05.pptx" download>GSEA plots</a> (vecotorised pptx).
+
+## Session info
+```{r sessioninfo}
+sessionInfo()
+```
+
+<!--chapter:end:2021-03-08_DB_DE.Rmd-->
+
+# Appendix
+
+## Gene set sources
+- @masouleh2014mechanistic Prdm1/Blimp1 repressed genes defined by Prdm1-KO in pro- and pre-B cells
+- @schjerven2017genetic Ikzf1 activated/respressed genes defined by Ikzf1
+
+<!--chapter:end:98_appendix.Rmd-->
+
+`r if (knitr::is_html_output()) '
+# References {-}
+'`
+
+<!--chapter:end:99_references.Rmd-->
+

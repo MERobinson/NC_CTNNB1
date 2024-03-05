@@ -1,0 +1,391 @@
+# Histone marks DiffBind
+
+## Setup
+```{r load_env, message = FALSE, warning = FALSE}
+library(rtracklayer)
+library(BiocParallel)
+library(doParallel)
+library(DiffBind)
+library(dplyr)
+library(tidyverse)
+library(ChIPseeker)
+library(ChIPpeakAnno)
+library(EnsDb.Mmusculus.v79)
+library(rvg)
+library(officer)
+registerDoParallel(5)
+register(MulticoreParam(workers = 5))
+register(DoparParam(), default = TRUE)
+options(MulticoreParam=quote(DoparParam(workers=6)))
+```
+
+## Sample information
+```{r setup, message=F}
+bampath <- "../processed_data/ChIPseq/bam"
+bamfiles <- list.files(path = bampath, pattern = ".bam$", full.names = T)
+bamfiles <- bamfiles[grep("H3K", bamfiles)]
+pattern <- "^.+Ex3Fl_(Cre|ERT2)_(NTC|Ikzf13KO)_(H3K27ac|H3K4me3)_.+_r([0-9])\\.bam$"
+si <- data.frame(SampleID = sub(pattern, "\\1_\\2_\\3_\\4", bamfiles),
+                 Condition = sub(pattern, "\\1_\\2", bamfiles),
+                 Factor = sub(pattern, "\\3", bamfiles),
+                 Replicate = sub(pattern, "\\4", bamfiles),
+                 bamReads = bamfiles,
+                 Peaks = gsub("/bam/", "/peaks/", bamfiles),
+                 PeakCaller = "macs",
+                 ControlID = "Input",
+                 bamControl = "../processed_data/ChIPseq/bam/pooled_input_r1.bam")
+si$Peaks <- gsub("\\.bam", "\\_peaks.xls", si$Peaks)
+si$Condition <- factor(si$Condition, levels = c("ERT2_NTC","Cre_NTC","ERT2_Ikzf13KO","Cre_Ikzf13KO"))
+```
+
+## Merge peak regions
+```{r merge_peaks, warning=F, message=F}
+dba <- list("H3K27ac" = dba(sampleSheet = si[si$Factor == "H3K27ac",], filter = 20),
+            "H3K4me3" = dba(sampleSheet = si[si$Factor == "H3K4me3",], filter = 20))
+sapply(names(dba), function(x) {
+  tmp <- as.data.frame(dba[[x]]$merged)
+  tmp$CHR <- plyr::mapvalues(tmp$CHR, from = 1:21, to = dba[[x]]$chrmap)
+  tmp <- rbind(data.frame(CHR="chr15", START=63607241, END=63768300), tmp)
+  tmp <- GenomicRanges::reduce(GRanges(tmp) + 1e3) - 1e3
+  tmp$score <- 1
+  export.bed(tmp, paste0("../processed_data/ChIPseq/peaks/merged_peak_regions_",x,".bed"))
+})
+```
+
+## Count and filter peaks
+```{r dba_init, eval=F, message = FALSE}
+si$Peaks <- ifelse(si$Factor == "H3K27ac",
+                   "../processed_data/ChIPseq/peaks/merged_peak_regions_H3K27ac.bed",
+                   "../processed_data/ChIPseq/peaks/merged_peak_regions_H3K4me3.bed")
+si$PeakCaller <- "bed"
+si <- list("H3K27ac" = si[si$Factor == "H3K27ac",],
+           "H3K4me3" = si[si$Factor == "H3K4me3",])
+dba <- lapply(si, function(sisub) {
+  dba(sampleSheet = sisub, filter=0) %>%
+  dba.blacklist(blacklist = F, greylist = F) %>%
+  dba.count(summits = F) %>%
+  dba.normalize()
+})
+saveRDS(dba, "../processed_data/ChIPseq/NC_CTNNB1_H3K_DBA.2021-06-08.rds")
+```
+
+## Clustering
+```{r dba_cluster, message = FALSE, fig.width=8, fig.height=6}
+dba <- readRDS("../processed_data/ChIPseq/NC_CTNNB1_H3K_DBA.2021-06-08.rds")
+p1 <- dba.plotPCA(dba$H3K27ac, dotSize = 2, 
+                  vColors = c("#99111144","#991111AA","#22551144","#225511AA"),
+                  attributes=c(DBA_TREATMENT, DBA_CONDITION))
+p2 <- dba.plotPCA(dba$H3K4me3, dotSize = 2, 
+                  vColors = c("#99111144","#991111AA","#22551144","#225511AA"),
+                  attributes=c(DBA_TREATMENT, DBA_CONDITION))
+cowplot::plot_grid(p1,p2)
+```
+
+## Call DB regions
+```{r dba_analyze, message = FALSE}
+contrasts <- list("Cre-NTC_vs_ERT2-NTC" = c("Condition", "Cre_NTC", "ERT2_NTC"),
+                  "Cre-Ik13_vs_ERT2-Ik13" = c("Condition", "Cre_Ikzf13KO", "ERT2_Ikzf13KO"),
+                  "ERT2-Ik13_vs_ERT2-NTC" = c("Condition", "ERT2_Ikzf13KO", "ERT2_NTC"),
+                  "Cre-Ik13_vs_Cre-NTC" = c("Condition", "Cre_Ikzf13KO", "Cre_NTC"))
+dbres <- lapply(dba, function(factor) {
+  lapply(contrasts, function(contrast) {
+    cnt <- dba.contrast(factor, contrast = contrast)
+    cnt <- dba.analyze(cnt)
+    dba.report(cnt, th = 1, bFlip = F)
+  })
+})
+```
+
+## Plot MA
+```{r maplots, fig.height=4, fig.width=8}
+static_pl <- lapply(names(dbres), function(factor) {
+  lapply(names(contrasts), function(contrast) {
+    plotdat <- as.data.frame(dbres[[factor]][[contrast]])
+    plotdat$color <- ifelse(plotdat$FDR > 0.05, "B",
+                            ifelse(plotdat$Fold > 0, "A", "C"))
+    plottxt <- data.frame(x = c(10,10), y = c(9,-9), color = c("A","C"),
+                          label = c(table(plotdat$color)[c(1,3)]))
+    ggplot(plotdat, aes(x = Conc, y= Fold, color = color)) +
+      geom_hline(yintercept = 0, color="grey40", lty=2) +
+      geom_point(size=0.75) +
+      scale_color_manual(values = c("firebrick","grey40","steelblue")) +
+      scale_x_continuous(limits=c(0,10),
+                         name = "Average signal") +
+      scale_y_continuous(limits=c(-10,10),
+                         name = paste0(factor, " L2FC")) +
+      ggtitle(gsub("_"," ",contrast)) +
+      theme_bw(base_size = 12) +
+      theme(panel.grid = element_blank(),
+            panel.background = element_blank(),
+            legend.position = "none",
+            title = element_text(size=9, color="white"),
+            axis.text = element_text(size=9, color="white"),
+            axis.ticks = element_line(color="white"))
+  })
+}) %>% flatten()
+vect_pl <- lapply(names(dbres), function(factor) {
+  lapply(names(contrasts), function(contrast) {
+    plotdat <- as.data.frame(dbres[[factor]][[contrast]])
+    plotdat$color <- ifelse(plotdat$FDR > 0.05, "B",
+                            ifelse(plotdat$Fold > 0, "A", "C"))
+    plottxt <- data.frame(x = c(10,10), y = c(9,-9), color = c("A","C"),
+                          label = c(table(plotdat$color)[c(1,3)]))
+    ggplot(plotdat, aes(x = Conc, y= Fold, color = color)) +
+      geom_hline(yintercept = 0, color="grey40", lty=2) +
+      geom_text(data=plottxt, aes(x=x, y=y, label=label, hjust=1)) +
+      scale_color_manual(values = c("firebrick","grey40","steelblue")) +
+      scale_x_continuous(limits=c(0,10),
+                         name = "Average signal") +
+      scale_y_continuous(limits=c(-10,10),
+                         name = paste0(factor, " L2FC")) +
+      ggtitle(gsub("_"," ",contrast)) +
+      theme_bw(base_size = 12) +
+      theme(panel.grid = element_blank(),
+            panel.background = element_blank(),
+            panel.border = element_rect(color="black",fill=NA),
+            legend.position = "none",
+            title = element_text(size=9))
+  })
+}) %>% flatten()
+static_cp <- cowplot::plot_grid(plotlist=static_pl, nrow=2)
+vect_cp <- cowplot::plot_grid(plotlist=vect_pl, nrow=2)
+source("../../resources/pptx_plot_func.R")
+gen_statvect_pptx(static = static_cp, vectorized = vect_cp,
+                  file = "../img/H3K27ac_DB_MAplots.2021-03-30.pptx",
+                  height = 5, width = 8)
+```
+
+## Annotate sites
+```{r anno, eval=F}
+txdb <- EnsDb.Mmusculus.v79
+genes <- genes(txdb, filter = AnnotationFilter(~gene_biotype == "protein_coding"))
+seqlevelsStyle(genes) <- "UCSC"
+dbanno <- lapply(dbres, function(factor) {
+  lapply(factor, function(comparison) {
+    annotatePeak(comparison, tssRegion=c(-3000, 2000),
+               TxDb=genes, annoDb="org.Mm.eg.db")
+  })
+})
+saveRDS(dbanno, "../processed_data/ChIPseq/BcatGOF_H3K_DBanno.2021-4-07.rds")
+lapply(names(dbanno), function(factor) {
+  lapply(names(dbanno[[factor]]), function(comparison) {
+    gr <- dbanno[[factor]][[comparison]]@anno
+    gr$name <- paste0("peak_", names(gr))
+    gr$score <- gr$Fold
+    export.bed(gr, paste0("../processed_data/ChIPseq/bed/BcatGOF_", factor, "_", 
+                           comparison, "_ChIPseq.2021-04-07.bed"))
+  })
+})
+```
+
+```{r dbcomb, message=F, warning=F}
+dbanno <- readRDS("../processed_data/ChIPseq/BcatGOF_H3K_DBanno.2021-4-07.rds")
+dbcombined <- lapply(names(dbanno), function(factor) {
+  tmp <- lapply(names(dbanno[[factor]]), function(comparison) {
+    df <- as.data.frame(dbanno[[factor]][[comparison]]@anno)
+    df$peakID <- paste0("peak_", rownames(df))
+    df <- df[,c(24,1:3,21,23,7:9,11)]
+    colnames(df)[c(2)] <- "chr"
+    colnames(df)[9:10] <- c(paste0("FC_", comparison),
+                            paste0("qval_", comparison))
+    colnames(df) <- gsub("Conc_", "signal_", colnames(df))
+    return(df)
+  })
+  comb <- merge(tmp[[1]], tmp[[2]], all = T,
+                by=c("peakID","chr","start","end","symbol","distanceToTSS"))
+  comb <- merge(comb, tmp[[3]], all = T,
+                by=c("peakID","chr","start","end","symbol","distanceToTSS"))
+  comb <- merge(comb, tmp[[4]], all = T,
+                by=c("peakID","chr","start","end","symbol","distanceToTSS"))
+  comb <- comb[, !grepl("\\.[y-z]$", colnames(comb))]
+  comb <- comb[,c(1:6, grep("FC_", colnames(comb)),
+                  grep("qval_", colnames(comb)),
+                  grep("signal_", colnames(comb)))]
+  colnames(comb) <- sub("^(.+)\\.x$", "\\1", colnames(comb))
+  openxlsx::write.xlsx(comb, firstRow = T,
+                       paste0("../results/BcatGOF_", factor, "_ChIPseq.2021-04-07.xlsx"))
+  return(comb)
+})
+names(dbcombined) <- names(dbanno)
+benc <- rtracklayer::import.bed("../public_data/myc_enhancers/benc_enh_mm10.bed")
+ol <- findOverlaps(benc, GRanges(dbcombined$H3K27ac))
+dbcombined$H3K27ac[subjectHits(ol),]$symbol <- "BENC"
+ol <- findOverlaps(benc, GRanges(dbcombined$H3K4me3))
+dbcombined$H3K4me3[subjectHits(ol),]$symbol <- "BENC"
+```
+
+## DE Integration
+```{r dbde_int, message=F}
+de <- readRDS("../processed_data/RNAseq/IkKO_bcatGOF_DE.2021-03-05.rds")
+colnames(de) <- gsub("L2FC", "DE_FC", colnames(de))
+colnames(de) <- gsub("padj", "DE_qval", colnames(de))
+colnames(de) <- gsub("^av_([IN])", "av_expr_\\1", colnames(de))
+colnames(de) <- gsub("NTC_Cre", "Cre-NTC", colnames(de))
+colnames(de) <- gsub("NTC_ERT2", "ERT2-NTC", colnames(de))
+colnames(de) <- gsub("Ik_Cre", "Cre-Ik13", colnames(de))
+colnames(de) <- gsub("Ik_ERT2", "ERT2-Ik13", colnames(de))
+de <- de[,1:17]
+dbde <- lapply(dbcombined, function(x) {
+  colnames(x) <- gsub("^FC", "DB_FC", colnames(x))
+  colnames(x) <- gsub("^qval", "DB_qval", colnames(x))
+  merge(x, de, by.x = "symbol", by.y = "gene_symbol", all.x = T)
+})
+static_pl <- lapply(names(dbanno$H3K27ac), function(comp) {
+  plotdat <- dbde$H3K27ac[,c(1, 6, grep(comp, colnames(dbde$H3K27ac)))] %>%
+    dplyr::filter(abs(distanceToTSS) < 5000)
+  colnames(plotdat) <- sub("^((DB|DE)_(FC|qval))_.+$", "\\1", colnames(plotdat))
+  ggplot(plotdat, aes(x=DB_FC, y=DE_FC)) +
+    geom_point(data = dplyr::filter(plotdat, abs(DB_FC) < 0.58 | abs(DE_FC) < 0.58), 
+               col = "grey60", alpha =.5) +
+    geom_point(data = dplyr::filter(plotdat, DB_FC > 0.58 & DE_FC > 0.58), 
+               col = "#B22421bb") +
+    geom_point(data = dplyr::filter(plotdat, DB_FC > 0.58 & DE_FC < -0.58),
+               col = "#4581B344") +
+    geom_point(data = dplyr::filter(plotdat, DB_FC < -0.58 & DE_FC > 0.58), 
+               col = "#B2242144") +
+    geom_point(data = dplyr::filter(plotdat, DB_FC < -0.58 & DE_FC < -0.58),
+               col = "#4581B3bb") +
+    scale_y_continuous(limits=c(-8,8)) +
+    scale_x_continuous(limits=c(-8,8)) +
+    theme_bw() +
+    theme(panel.grid = element_blank(),
+          axis.title = element_text(color="white"),
+          axis.text = element_text(color="white"))
+})
+vect_pl <- lapply(names(dbanno$H3K27ac), function(comp) {
+  plotdat <- dbde$H3K27ac[,c(1, 6, grep(comp, colnames(dbde$H3K27ac)))] %>%
+    dplyr::filter(abs(distanceToTSS) < 5000)
+  colnames(plotdat) <- sub("^((DB|DE)_(FC|qval))_.+$", "\\1", colnames(plotdat))
+  plotdat$comb_score <- abs(plotdat$DB_FC) + abs(plotdat$DE_FC)
+  ggplot(plotdat, aes(x=DB_FC, y=DE_FC)) +
+    geom_hline(yintercept = 0, lty=2, color="grey", alpha=0.5) +
+    geom_vline(xintercept = 0, lty=2, color="grey", alpha=0.5) +
+    geom_text(data = plotdat %>% top_n(n=20, comb_score),
+              aes(label=symbol), check_overlap = F) +
+    scale_y_continuous(limits=c(-8,8)) +
+    scale_x_continuous(limits=c(-8,8)) +
+    theme_bw() +
+    theme(panel.grid = element_blank())
+})
+cp_stat <- cowplot::plot_grid(plotlist=static_pl, nrow=2)
+cp_vect <- cowplot::plot_grid(plotlist=vect_pl, nrow=2)
+gen_statvect_pptx(static=cp_stat, vectorized = cp_vect,
+                  file = "../img/H3K27ac_DB_DE_scatters.pptx",
+                  height=5, width=5.5)
+```
+
+## TF DB integration
+```{r tfdb, message=F, warning=F}
+dbtf <- readRDS("../processed_data/ChIPseq/Bcat_Ik_DBanno.2021-02-17.rds")
+dbdetf <- lapply(names(dbde), function(h3k_mark) {
+  gr <- GRanges(dbde[[h3k_mark]])
+  gof <- dbtf$Ik13_GOF_vs_ERT2@anno
+  ol <- findOverlaps(gr, gof)
+  gr$Ikzf13_signal <- NA
+  gr$Ikzf13_signal[unique(queryHits(ol))] <- sapply(unique(queryHits(ol)), function(idx) {
+    sum(gof[subjectHits(ol[queryHits(ol)==idx,]), ]$Conc) })
+  gr$Ikzf13_FC_Cre_vs_ERT2 <- NA
+  gr$Ikzf13_FC_Cre_vs_ERT2[unique(queryHits(ol))] <- sapply(unique(queryHits(ol)), function(idx) {
+    mean(gof[subjectHits(ol[queryHits(ol)==idx,]), ]$Fold) })
+  ikko <- dbtf$Bcat_IkKO_vs_WT@anno
+  ol <- findOverlaps(gr, ikko)
+  gr$Ctnnb1_signal <- NA
+  gr$Ctnnb1_signal[unique(queryHits(ol))] <- sapply(unique(queryHits(ol)), function(idx) {
+    sum(ikko[subjectHits(ol[queryHits(ol)==idx,]), ]$Conc) })
+  gr$Ctnnb1_FC_Ik13KO_vs_NTC <- NA
+  gr$Ctnnb1_FC_Ik13KO_vs_NTC[unique(queryHits(ol))] <- sapply(unique(queryHits(ol)), function(idx) {
+    mean(ikko[subjectHits(ol[queryHits(ol)==idx,]), ]$Fold) })
+  df <- as.data.frame(gr)
+  write.csv(df, paste0("../results/", h3k_mark, "_DB_DE_TF_combined.2021-05-04.csv"),
+            row.names = F)
+  return(gr)
+})
+saveRDS(dbdetf, "../processed_data/ChIPseq/BcatGOF_H3K_DB_DE_TF_combined.2022-05-04.rds")
+```
+
+## H3K-TF DB heatmaps
+```{r h3k_hm, message=F, warning=F}
+Sys.setenv(PATH=paste(Sys.getenv("PATH"), "/Users/mer92/opt/miniconda3/bin", sep=":"))
+bedfiles <- list.files("../processed_data/ChIPseq/bed", pattern = ".bed", full.names = T)
+bedfiles <- bedfiles[grep("Ctnnb1", bedfiles)]
+names(bedfiles) <- sub("^.+peaks_(UP|DN|UN|denovo|lost).bed$", "\\1", bedfiles)
+bwfiles <- list.files("../processed_data/ChIPseq/tracks", pattern = ".bw", 
+                      recursive = T, full.names = T)
+names(bwfiles) <- sub("^.+Ex3Fl_(.+)_ChIP.+(r[0-9]).+$", "\\1_\\2", bwfiles)
+names(bwfiles) <- sub("^.+(pooled_input_r[0-9]).+$", "\\1", names(bwfiles))
+system(paste("computeMatrix reference-point",
+             "--regionsFileName", paste(bedfiles[c(1,5,4,2,3)], collapse = " "),
+             "--scoreFileName", paste(bwfiles[c("pooled_input_r1",
+                                                "Cre_NTC_CTNNB1_r1",
+                                                "Cre_Ikzf13KO_CTNNB1_r1",
+                                                "Cre_NTC_IKZF1_r1",
+                                                "Cre_NTC_IKZF3_r1",
+                                                "ERT2_NTC_H3K27ac_r1",
+                                                "ERT2_Ikzf13KO_H3K27ac_r1",
+                                                "Cre_NTC_H3K27ac_r1",
+                                                "Cre_Ikzf13KO_H3K27ac_r1",
+                                                "ERT2_NTC_H3K4me3_r1",
+                                                "ERT2_Ikzf13KO_H3K4me3_r1",
+                                                "Cre_NTC_H3K4me3_r1",
+                                                "Cre_Ikzf13KO_H3K4me3_r1")], collapse = " "),
+             "-a 2000 -b 2000 --referencePoint center",
+             "-o ../processed_data/ChIPseq/Ctnnb1_DB_regions_H3K_covmatrix.mat"))
+system(paste("plotHeatmap -m ../processed_data/ChIPseq/Ctnnb1_DB_regions_H3K_covmatrix.mat",
+             "-o ../img/Ctnnb1_DB_regions_H3K_heatmap.svg",
+             "--zMax 10 10 10 10 10 40 40 40 40 160 160 160 160",
+             "--colorList 'white,grey,black' 'white,#eed8d8,#800000' 'white,#ffd5d5,#d43c3c'",
+             "'white,#eed8d8,#800000' 'white,#eed8d8,#800000'",
+             "'white,#e8f3e8,#003300' 'white,#eeeeee,#77bb77' 'white,#eed8d8,#800000' 'white,#ffd5d5,#d43c3c'",
+             "'white,#e8f3e8,#003300' 'white,#eeeeee,#77bb77' 'white,#eed8d8,#800000' 'white,#ffd5d5,#d43c3c'"))
+bedfiles <- list.files("../processed_data/ChIPseq/bed", pattern = ".bed", full.names = T)
+bedfiles <- bedfiles[grep("Ikzf", bedfiles)]
+names(bedfiles) <- sub("^.+peaks_(UP|DN|UN|denovo|lost).bed$", "\\1", bedfiles)
+system(paste("computeMatrix reference-point",
+             "--regionsFileName", paste(bedfiles[c(1,5,4,2,3)], collapse = " "),
+             "--scoreFileName", paste(bwfiles[c("pooled_input_r1",
+                                                "ERT2_NTC_IKZF1_r1",
+                                                "ERT2_NTC_IKZF3_r1",
+                                                "Cre_NTC_IKZF1_r1",
+                                                "Cre_NTC_IKZF3_r1",
+                                                "Cre_NTC_CTNNB1_r1",
+                                                "ERT2_NTC_H3K27ac_r1",
+                                                "ERT2_Ikzf13KO_H3K27ac_r1",
+                                                "Cre_NTC_H3K27ac_r1",
+                                                "Cre_Ikzf13KO_H3K27ac_r1",
+                                                "ERT2_NTC_H3K4me3_r1",
+                                                "ERT2_Ikzf13KO_H3K4me3_r1",
+                                                "Cre_NTC_H3K4me3_r1",
+                                                "Cre_Ikzf13KO_H3K4me3_r1")], collapse = " "),
+             "-a 2000 -b 2000 --referencePoint center",
+             "-o ../processed_data/ChIPseq/Ikzf13_DB_regions_H3K_covmatrix.mat"))
+system(paste("plotHeatmap -m ../processed_data/ChIPseq/Ctnnb1_DB_regions_H3K_covmatrix.mat",
+             "-o ../img/Ikzf13_DB_regions_H3K_heatmap.svg",
+             "--zMax 10 10 10 10 10 10 40 40 40 40 160 160 160 160",
+             "--colorList 'white,grey,black' 'white,#e8f3e8,#003300'",
+             "'white,#eed8d8,#800000' 'white,#ffd5d5,#d43c3c' 'white,#ffd5d5,#d43c3c'",
+             "'white,#eeeeee,#77bb77' 'white,#eeeeee,#77bb77' 'white,#eed8d8,#800000'",
+             "'white,#e8f3e8,#003300' 'white,#eeeeee,#77bb77' 'white,#eed8d8,#800000' 'white,#ffd5d5,#d43c3c'",
+             "'white,#e8f3e8,#003300' 'white,#eeeeee,#77bb77' 'white,#eed8d8,#800000' 'white,#ffd5d5,#d43c3c'"))
+```
+
+```{r h3k_scatter}
+dbde <- readRDS("../processed_data/ChIPseq/BcatGOF_H3K_DB_DE_TF_combined.2021-04-27.rds")
+dbde <- dbde[[1]] %>%
+  as.data.frame()
+colnames(dbde) <- gsub("\\.", "_", colnames(dbde))
+dbde$color <- "unalt"
+dbde[which(dbde$Ctnnb1_FC_Ik13KO_vs_NTC > 1),]$color <- "bcat_UP"
+dbde[which(dbde$Ctnnb1_FC_Ik13KO_vs_NTC < -1),]$color <- "bcat_DN"
+dbde$label <- NA
+dbde[which(dbde$symbol %in% c("Myc")),]$label <- dbde[which(dbde$symbol %in% c("Myc")),]$symbol
+ggplot(data = dbde, 
+         aes(x = DB_FC_Cre_Ik13_vs_Cre_NTC,
+             y = DE_FC_Cre_Ik13_vs_Cre_NTC)) +
+  geom_point(data = dplyr::filter(dbde, color=="unalt"), color="#99999966") +
+  geom_point(data = dplyr::filter(dbde, color!="unalt"), aes(color=color)) +
+  ggrepel::geom_text_repel(aes(label=label)) +
+  scale_color_manual(values=c("steelblue","firebrick")) +
+  theme_bw(base_size = 14)
+
+```
+

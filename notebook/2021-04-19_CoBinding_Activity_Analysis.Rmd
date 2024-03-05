@@ -1,0 +1,261 @@
+
+
+```{r load_env, warning = F, message = F}
+library(MACSr)
+library(TxDb.Mmusculus.UCSC.mm10.knownGene)
+library(ChIPpeakAnno)
+library(ChIPseeker)
+library(EnsDb.Mmusculus.v79)
+library(UpSetR)
+library(dplyr)
+library(officer)
+library(rvg)
+library(egg)
+```
+
+```{r make_upset_plots, warning = F, message = F}
+
+treatments <- c("Cre_Ikzf13_WT", "Cre_Ikzf13_KO")
+
+lapply(treatments, function(treatment){
+  H3K27ac_Peaks <- as.data.frame(read.table(paste0("../processed_data/Bcat/ChIPseq/peaks/BcatGOF_", treatment, "_H3K27ac_ChIPseq.broadPeak") ,header = FALSE, sep="\t",stringsAsFactors=FALSE, quote=""))
+  colnames(H3K27ac_Peaks) <- c('chr','start','end')
+  H3K4me3_Peaks <- as.data.frame(read.table(paste0("../processed_data/Bcat/ChIPseq/peaks/BcatGOF_", treatment, "_H3K4me3_ChIPseq.broadPeak") ,header = FALSE, sep="\t",stringsAsFactors=FALSE, quote=""))
+  colnames(H3K4me3_Peaks) <- c('chr','start','end')
+  
+  Bcat_Peaks <- as.data.frame(read.table(paste0("../processed_data/Bcat/ChIPseq/peaks/BcatGOF_",treatment,"_CTNNB1_ChIPseq.narrowPeak"),header = FALSE, sep="\t",stringsAsFactors=FALSE, quote=""))
+  colnames(Bcat_Peaks) <- c('chr','start','end')
+  
+  if (!grepl('KO',treatment)) { 
+    Ikzf1_Peaks <- as.data.frame(read.table(paste0("../processed_data/Bcat/ChIPseq/peaks/BcatGOF_",treatment,"_Ikzf1_ChIPseq.narrowPeak"),header = FALSE, sep="\t",stringsAsFactors=FALSE, quote=""))
+    colnames(Ikzf1_Peaks) <- c('chr','start','end')
+    Ikzf3_Peaks <- as.data.frame(read.table(paste0("../processed_data/Bcat/ChIPseq/peaks/BcatGOF_",treatment,"_Ikzf3_ChIPseq.narrowPeak"),header = FALSE, sep="\t",stringsAsFactors=FALSE, quote=""))
+    colnames(Ikzf3_Peaks) <- c('chr','start','end')
+  }
+  
+  Merged_Peaks <- as.data.frame(read.table(paste0("../processed_data/Bcat/ChIPseq/peaks/BcatGOF_", treatment, "_Merged.peak"),header = FALSE, sep="\t",stringsAsFactors=FALSE, quote=""))
+  colnames(Merged_Peaks) <- c('chr','start','end')
+  
+  hits <- matrix(nrow = nrow(Merged_Peaks), ncol = 5)
+  hit_df <- data.frame(hits)
+  H3K27ac_Overlaps = findOverlaps(makeGRangesFromDataFrame(Merged_Peaks), makeGRangesFromDataFrame(H3K27ac_Peaks))
+  hit_df[queryHits(H3K27ac_Overlaps), 1] <- 1
+  H3K4me3_Overlaps = findOverlaps(makeGRangesFromDataFrame(Merged_Peaks), makeGRangesFromDataFrame(H3K4me3_Peaks))
+  hit_df[queryHits(H3K4me3_Overlaps), 2] <- 1
+  Bcat_Overlaps = findOverlaps(makeGRangesFromDataFrame(Merged_Peaks), makeGRangesFromDataFrame(Bcat_Peaks))
+  hit_df[queryHits(Bcat_Overlaps), 3] <- 1
+
+  set <- c('H3K27ac','H3K4me3','CTNNB1')
+
+  if (!grepl('KO',treatment)) { 
+    Ikzf1_Overlaps = findOverlaps(makeGRangesFromDataFrame(Merged_Peaks), makeGRangesFromDataFrame(Ikzf1_Peaks))
+    hit_df[queryHits(Ikzf1_Overlaps), 4] <- 1
+    Ikzf3_Overlaps = findOverlaps(makeGRangesFromDataFrame(Merged_Peaks), makeGRangesFromDataFrame(Ikzf3_Peaks))
+    hit_df[queryHits(Ikzf3_Overlaps), 5] <- 1
+    set <- c('H3K27ac','H3K4me3','CTNNB1','Ikzf1','Ikzf3')
+  }
+  
+  colnames(hit_df) <- c('H3K27ac','H3K4me3','CTNNB1','Ikzf1','Ikzf3')
+  
+  hit_df[is.na(hit_df)] <- 0
+  
+  pdf(file= paste0("../img/upset_", treatment, ".pdf"))
+
+  print(upset(hit_df, sets = set, sets.bar.color = "#56B4E9", order.by = "freq"))
+  print(grid.text(treatment,x = 0.65, y=0.95, gp=gpar(fontsize=12)))
+  
+  dev.off()
+  
+  return(NULL)
+})
+
+
+
+```
+
+```{r annotate_promoter_marks, warning = F}
+treatments <- c("Cre_Ikzf13_WT")
+
+lapply(treatments, function(treatment){
+  H3K27ac_Peaks <- as.data.frame(read.table(paste0("../processed_data/Bcat/ChIPseq/peaks/BcatGOF_", treatment, "_H3K27ac_ChIPseq.broadPeak") ,header = FALSE, sep="\t",stringsAsFactors=FALSE, quote=""))
+  colnames(H3K27ac_Peaks) <- c('chr','start','end')
+  H3K4me3_Peaks <- as.data.frame(read.table(paste0("../processed_data/Bcat/ChIPseq/peaks/BcatGOF_", treatment, "_H3K4me3_ChIPseq.broadPeak") ,header = FALSE, sep="\t",stringsAsFactors=FALSE, quote=""))
+  colnames(H3K4me3_Peaks) <- c('chr','start','end')
+
+  if (!grepl('KO',treatment)) { 
+    Ikzf1_Peaks <- as.data.frame(read.table(paste0("../processed_data/Bcat/ChIPseq/peaks/BcatGOF_",treatment,"_Ikzf1_ChIPseq.narrowPeak"),header = FALSE, sep="\t",stringsAsFactors=FALSE, quote=""))
+    colnames(Ikzf1_Peaks) <- c('chr','start','end')
+    Ikzf3_Peaks <- as.data.frame(read.table(paste0("../processed_data/Bcat/ChIPseq/peaks/BcatGOF_",treatment,"_Ikzf3_ChIPseq.narrowPeak"),header = FALSE, sep="\t",stringsAsFactors=FALSE, quote=""))
+    colnames(Ikzf3_Peaks) <- c('chr','start','end')
+  }
+  
+  Bcat_Peaks <- as.data.frame(read.table(paste0("../processed_data/Bcat/ChIPseq/peaks/BcatGOF_",treatment,"_CTNNB1_ChIPseq.narrowPeak"),header = FALSE, sep="\t",stringsAsFactors=FALSE, quote=""))
+  colnames(Bcat_Peaks) <- c('chr','start','end')
+
+  peaks <- list(H3K4me3_Peaks, Bcat_Peaks, Ikzf1_Peaks, Ikzf3_Peaks)
+  peaks_anno <- lapply(peaks, function(peak){
+    Peaks_Anno <- as.data.frame(annotatePeakInBatch(makeGRangesFromDataFrame(peak), featureType = 'TSS', AnnotationData = TSS.mouse.GRCm38))
+    
+    Peaks_Anno <- na.omit(Peaks_Anno)
+    Peaks_TSS_Anno_Promoters <- Peaks_Anno[Peaks_Anno$distancetoFeature < 2000 & Peaks_Anno$distancetoFeature > -3000,]
+    return(Peaks_TSS_Anno_Promoters)
+  })
+  
+  H3K4me3_TSS_Anno_Promoters <- peaks_anno[[1]]
+
+  active_promoter_counts <- c(nrow(as.data.frame(GenomicRanges::intersect(makeGRangesFromDataFrame(H3K4me3_TSS_Anno_Promoters), makeGRangesFromDataFrame(peaks_anno[[2]])))),nrow(as.data.frame(GenomicRanges::intersect(makeGRangesFromDataFrame(H3K4me3_TSS_Anno_Promoters), makeGRangesFromDataFrame(peaks_anno[[3]])))), nrow(as.data.frame(GenomicRanges::intersect(makeGRangesFromDataFrame(H3K4me3_TSS_Anno_Promoters), makeGRangesFromDataFrame(peaks_anno[[4]])))))
+  
+  inactive_promoter_counts <- c(nrow(as.data.frame(GenomicRanges::setdiff(makeGRangesFromDataFrame(peaks_anno[[2]]), makeGRangesFromDataFrame(H3K4me3_TSS_Anno_Promoters)))),nrow(as.data.frame(GenomicRanges::setdiff(makeGRangesFromDataFrame(peaks_anno[[3]]), makeGRangesFromDataFrame(H3K4me3_TSS_Anno_Promoters)))), nrow(as.data.frame(GenomicRanges::setdiff(makeGRangesFromDataFrame(peaks_anno[[4]]), makeGRangesFromDataFrame(H3K4me3_TSS_Anno_Promoters)))))
+  
+#  H3K4me3_Genes_Active <- ensembldb::select(EnsDb.Mmusculus.v79, keys= H3K4me3_TSS_Anno_Promoters$feature, keytype = "GENEID", columns = c("SYMBOL","GENEID"))
+#  
+#  Gene_IDs <- names(TSS.mouse.GRCm38)
+#  
+#  H3K4me3_Genes_Inactive <- ensembldb::select(EnsDb.Mmusculus.v79, keys= setdiff(Gene_IDs, H3K4me3_TSS_Anno_Promoters$feature), keytype = "GENEID", columns = c("SYMBOL","GENEID"))
+  
+  txdb <-TxDb.Mmusculus.UCSC.mm10.knownGene
+  peakAnno <- as.data.frame(annotatePeak(makeGRangesFromDataFrame(H3K27ac_Peaks), tssRegion=c(-3000, 2000),
+                           TxDb=txdb, annoDb="org.Mm.eg.db")@anno)
+  
+  enhancers_peaks <- peakAnno[grepl('Intron', peakAnno['annotation'][[1]]) | grepl('Intergenic', peakAnno['annotation'][[1]]),]
+  
+  peakAnno <- as.data.frame(annotatePeak(makeGRangesFromDataFrame(Bcat_Peaks), tssRegion=c(-3000, 2000),
+                           TxDb=txdb, annoDb="org.Mm.eg.db")@anno)
+  
+  Bcat_enhancer_peaks <- peakAnno[grepl('Intron', peakAnno['annotation'][[1]]) | grepl('Intergenic', peakAnno['annotation'][[1]]),]
+  
+  peakAnno <- as.data.frame(annotatePeak(makeGRangesFromDataFrame(Ikzf1_Peaks), tssRegion=c(-3000, 2000),
+                           TxDb=txdb, annoDb="org.Mm.eg.db")@anno)
+  
+  Ikzf1_enhancer_peaks <- peakAnno[grepl('Intron', peakAnno['annotation'][[1]]) | grepl('Intergenic', peakAnno['annotation'][[1]]),]
+  
+  peakAnno <- as.data.frame(annotatePeak(makeGRangesFromDataFrame(Ikzf3_Peaks), tssRegion=c(-3000, 2000),
+                           TxDb=txdb, annoDb="org.Mm.eg.db")@anno)
+  
+  Ikzf3_enhancer_peaks <- peakAnno[grepl('Intron', peakAnno['annotation'][[1]]) | grepl('Intergenic', peakAnno['annotation'][[1]]),]
+  
+    active_enhancer_peaks <- c(nrow(as.data.frame(GenomicRanges::intersect(makeGRangesFromDataFrame(Bcat_enhancer_peaks), makeGRangesFromDataFrame(enhancers_peaks)))),nrow(as.data.frame(GenomicRanges::intersect(makeGRangesFromDataFrame(Ikzf1_enhancer_peaks), makeGRangesFromDataFrame(enhancers_peaks)))), nrow(as.data.frame(GenomicRanges::intersect(makeGRangesFromDataFrame(Ikzf3_enhancer_peaks), makeGRangesFromDataFrame(enhancers_peaks)))))
+  
+  inactive_enhancer_peaks <- c(nrow(as.data.frame(GenomicRanges::setdiff(makeGRangesFromDataFrame(Bcat_enhancer_peaks), makeGRangesFromDataFrame(enhancers_peaks)))),nrow(as.data.frame(GenomicRanges::setdiff(makeGRangesFromDataFrame(Ikzf1_enhancer_peaks), makeGRangesFromDataFrame(enhancers_peaks)))), nrow(as.data.frame(GenomicRanges::setdiff(makeGRangesFromDataFrame(Ikzf3_enhancer_peaks), makeGRangesFromDataFrame(enhancers_peaks)))))
+  
+  
+  Bcat_data <-  c(active_promoter_counts[1], inactive_promoter_counts[1], active_enhancer_peaks[1], inactive_enhancer_peaks[1])
+  
+  read_pptx() %>%
+    add_slide(layout = "Title and Content", master = "Office Theme") %>%
+    ph_with(value = dml(code = pie(Bcat_data, labels = paste(c("Active Promoter", "Inactive Promoter", "Active Enhancer", "Inactive Enhancer"),Bcat_data, paste0(round(Bcat_data / sum(Bcat_data) * 100), '%')), main = paste("CTNNB1 Region Counts",treatment))),
+            location = ph_location_fullsize(),
+            bg = "transparent") %>%
+    print(target = '../img/CTNNB1_Region_Counts_Cre_NTC.pptx')
+  
+  Ikzf1_data <- c(active_promoter_counts[2], inactive_promoter_counts[2], active_enhancer_peaks[2], inactive_enhancer_peaks[2])
+  
+  read_pptx() %>%
+    add_slide(layout = "Title and Content", master = "Office Theme") %>%
+    ph_with(value = dml(code =  pie(Ikzf1_data, labels = paste(c("Active Promoter", "Inactive Promoter", "Active Enhancer", "Inactive Enhancer"), Ikzf1_data, paste0(round(Ikzf1_data/sum(Ikzf1_data) * 100), '%')), main = paste("Ikzf1 Region Counts",treatment))),
+            location = ph_location_fullsize(),
+            bg = "transparent") %>%
+    print(target = '../img/Ikzf1_Region_Counts_Cre_NTC.pptx')
+  
+  Ikzf3_data <- c(active_promoter_counts[3], inactive_promoter_counts[3], active_enhancer_peaks[3], inactive_enhancer_peaks[3])
+  
+  read_pptx() %>%
+    add_slide(layout = "Title and Content", master = "Office Theme") %>%
+    ph_with(value = dml(code =  pie(Ikzf3_data, labels = paste(c("Active Promoter", "Inactive Promoter", "Active Enhancer", "Inactive Enhancer"), Ikzf3_data, paste0(round(Ikzf3_data/sum(Ikzf3_data) * 100), '%')), main = paste("Ikzf3 Region Counts",treatment))),
+            location = ph_location_fullsize(),
+            bg = "transparent") %>%
+    print(target = '../img/Ikzf3_Region_Counts_Cre_NTC.pptx')
+
+})
+
+```
+
+```{r Cre_Ikzf13_WT_pie}
+
+treatment <- "Cre_Ikzf13_WT"
+
+H3K27ac_Peaks <-as.data.frame(read.table(paste0("../processed_data/Bcat/ChIPseq/peaks/BcatGOF_", treatment, "_H3K27ac_ChIPseq.broadPeak") ,header = FALSE, sep="\t",stringsAsFactors=FALSE, quote=""))
+colnames(H3K27ac_Peaks) <- c('chr','start','end')
+H3K4me3_Peaks <- as.data.frame(read.table(paste0("../processed_data/Bcat/ChIPseq/peaks/BcatGOF_", treatment, "_H3K4me3_ChIPseq.broadPeak") ,header = FALSE, sep="\t",stringsAsFactors=FALSE, quote=""))
+colnames(H3K4me3_Peaks) <- c('chr','start','end')
+
+Ikzf1_Peaks <- as.data.frame(read.table(paste0("../processed_data/Bcat/ChIPseq/peaks/BcatGOF_",treatment,"_Ikzf1_ChIPseq.narrowPeak"),header = FALSE, sep="\t",stringsAsFactors=FALSE, quote=""))
+colnames(Ikzf1_Peaks) <- c('chr','start','end')
+Ikzf3_Peaks <- as.data.frame(read.table(paste0("../processed_data/Bcat/ChIPseq/peaks/BcatGOF_",treatment,"_Ikzf3_ChIPseq.narrowPeak"),header = FALSE, sep="\t",stringsAsFactors=FALSE, quote=""))
+colnames(Ikzf3_Peaks) <- c('chr','start','end')
+
+Bcat_Peaks <- as.data.frame(read.table(paste0("../processed_data/Bcat/ChIPseq/peaks/BcatGOF_",treatment,"_CTNNB1_ChIPseq.narrowPeak"),header = FALSE, sep="\t",stringsAsFactors=FALSE, quote=""))
+colnames(Bcat_Peaks) <- c('chr','start','end')
+
+peaks <- list( makeGRangesFromDataFrame(H3K27ac_Peaks),  makeGRangesFromDataFrame(H3K4me3_Peaks),  makeGRangesFromDataFrame(Bcat_Peaks),  makeGRangesFromDataFrame(Ikzf1_Peaks),  makeGRangesFromDataFrame(Ikzf3_Peaks))
+
+read_pptx() %>%
+  add_slide(layout = "Title and Content", master = "Office Theme") %>%
+  ph_with(value = dml(code = makeVennDiagram(list(peaks[[4]], peaks[[5]]),  NameOfPeaks=c("Ikzf1", "Ikzf3"), main = "Cre_ERT2_NTC Peaks", connectedPeaks = 'keepAll')),
+          location = ph_location_fullsize(),
+          bg = "transparent") %>%
+  print(target = '../img/Venn_Diagram_Cre_NTC_Ikzf1_Ikzf3.pptx')
+
+read_pptx() %>%
+  add_slide(layout = "Title and Content", master = "Office Theme") %>%
+  ph_with(value = dml(code = makeVennDiagram(list(peaks[[3]], peaks[[4]]),  NameOfPeaks=c("CTNNB1", "Ikzf1"), main = "Cre_ERT2_NTC Peaks", connectedPeaks = 'keepAll')),
+          location = ph_location_fullsize(),
+          bg = "transparent") %>%
+  print(target = '../img/Venn_Diagram_Cre_NTC_CTNNB1_Ikzf1.pptx')
+
+read_pptx() %>%
+  add_slide(layout = "Title and Content", master = "Office Theme") %>%
+  ph_with(value = dml(code = makeVennDiagram(list(peaks[[3]], peaks[[5]]),  NameOfPeaks=c("CTNNB1", "Ikzf3"), main = "Cre_ERT2_NTC Peaks", connectedPeaks = 'keepAll')),
+          location = ph_location_fullsize(),
+          bg = "transparent") %>%
+  print(target = '../img/Venn_Diagram_Cre_NTC_CTNNB1_Ikzf3.pptx')
+
+
+```
+
+```{r Cre_Ikzf13_KO_pie}
+treatment <- "Cre_Ikzf13_KO"
+
+H3K27ac_Peaks <-as.data.frame(read.table(paste0("../processed_data/Bcat/ChIPseq/peaks/BcatGOF_", treatment, "_H3K27ac_ChIPseq.broadPeak") ,header = FALSE, sep="\t",stringsAsFactors=FALSE, quote=""))
+colnames(H3K27ac_Peaks) <- c('chr','start','end')
+H3K4me3_Peaks <- as.data.frame(read.table(paste0("../processed_data/Bcat/ChIPseq/peaks/BcatGOF_", treatment, "_H3K4me3_ChIPseq.broadPeak") ,header = FALSE, sep="\t",stringsAsFactors=FALSE, quote=""))
+colnames(H3K4me3_Peaks) <- c('chr','start','end')
+
+Bcat_Peaks <- as.data.frame(read.table(paste0("../processed_data/Bcat/ChIPseq/peaks/BcatGOF_",treatment,"_CTNNB1_ChIPseq.narrowPeak"),header = FALSE, sep="\t",stringsAsFactors=FALSE, quote=""))
+colnames(Bcat_Peaks) <- c('chr','start','end')
+
+txdb <-TxDb.Mmusculus.UCSC.mm10.knownGene
+peakAnno <- as.data.frame(annotatePeak(makeGRangesFromDataFrame(H3K27ac_Peaks), tssRegion=c(-3000, 2000),
+                         TxDb=txdb, annoDb="org.Mm.eg.db")@anno)
+
+enhancers_peaks <- peakAnno[grepl('Intron', peakAnno['annotation'][[1]]) | grepl('Intergenic', peakAnno['annotation'][[1]]),]
+
+peakAnno <- as.data.frame(annotatePeak(makeGRangesFromDataFrame(Bcat_Peaks), tssRegion=c(-3000, 2000),
+                         TxDb=txdb, annoDb="org.Mm.eg.db")@anno)
+
+Bcat_enhancer_peaks <- peakAnno[grepl('Intron', peakAnno['annotation'][[1]]) | grepl('Intergenic', peakAnno['annotation'][[1]]),]
+
+Peaks_Anno <- as.data.frame(annotatePeakInBatch(makeGRangesFromDataFrame(H3K4me3_Peaks), featureType = 'TSS', AnnotationData = TSS.mouse.GRCm38))
+    
+Peaks_Anno <- na.omit(Peaks_Anno)
+H3K4me3_TSS_Anno_Promoters <- Peaks_Anno[Peaks_Anno$distancetoFeature < 2000 & Peaks_Anno$distancetoFeature > -3000,]
+
+Peaks_Anno <- as.data.frame(annotatePeakInBatch(makeGRangesFromDataFrame(Bcat_Peaks), featureType = 'TSS', AnnotationData = TSS.mouse.GRCm38))
+    
+Peaks_Anno <- na.omit(Peaks_Anno)
+Bcat_TSS_Anno_Promoters <- Peaks_Anno[Peaks_Anno$distancetoFeature < 2000 & Peaks_Anno$distancetoFeature > -3000,]
+
+Bcat_data <- c(nrow(as.data.frame(GenomicRanges::intersect(makeGRangesFromDataFrame(H3K4me3_TSS_Anno_Promoters), makeGRangesFromDataFrame(Bcat_TSS_Anno_Promoters)))), nrow(as.data.frame(GenomicRanges::setdiff(makeGRangesFromDataFrame(Bcat_TSS_Anno_Promoters), makeGRangesFromDataFrame(H3K4me3_TSS_Anno_Promoters)))),
+nrow(as.data.frame(GenomicRanges::intersect(makeGRangesFromDataFrame(Bcat_enhancer_peaks), makeGRangesFromDataFrame(enhancers_peaks)))),
+nrow(as.data.frame(GenomicRanges::setdiff(makeGRangesFromDataFrame(Bcat_enhancer_peaks), makeGRangesFromDataFrame(enhancers_peaks))))
+)
+
+read_pptx() %>%
+  add_slide(layout = "Title and Content", master = "Office Theme") %>%
+  ph_with(value = dml(code = pie(Bcat_data, labels = paste(c("Active Promoter", "Inactive Promoter", "Active Enhancer", "Inactive Enhancer"),Bcat_data, paste0(round(Bcat_data / sum(Bcat_data) * 100), '%')), main = paste("CTNNB1 Region Counts",treatment))),
+          location = ph_location_fullsize(),
+          bg = "transparent") %>%
+  print(target = '../img/CTNNB1_Region_Counts_Cre_Ikzf13_KO.pptx')
+  
+```
+

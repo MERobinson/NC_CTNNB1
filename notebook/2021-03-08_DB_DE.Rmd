@@ -1,0 +1,313 @@
+# Ikaros KO/Bcat GOF DE
+
+## Background
+
+..placeholder...
+
+## Setup
+```{r dbde_setup, warning=F, message=F}
+library(tidyverse)
+library(openxlsx)
+library(DT)
+```
+
+## Load data
+```{r dbde_load}
+deres <- readRDS("../processed_data/RNAseq/IkKO_bcatGOF_DE.2021-03-05.rds")
+dbres <- read.csv("../results/Ctnnb1-GOF_Ikzf1-KO_DB_res.2021-03-02.csv")
+```
+
+## Combine
+```{r dbde_combine}
+desub <- deres[match(dbres$ensemblID, deres$ensembl_id), 3:17]
+colnames(desub) <- paste0("Expr_", colnames(desub))
+dbcomb <- cbind(dbres[,c(5:6,1:4,7:17)], desub) %>% 
+  dplyr::filter(!is.na(Expr_av_expr)) %>%
+  arrange(Ctnnb1_qval)
+write.xlsx(dbcomb, "../results/IkKO_bcatGOF_DB_DE.2021-03-08.xlsx", firstCol=T, firstRow=T)
+```
+
+## Plot heatmaps
+```{r dbde_heatmaps}
+dbcomb <- readxl::read_excel("../results/IkKO_bcatGOF_DB_DE.2021-03-08.xlsx")
+dbcomb$avIk_binding <- rowMeans(dbcomb[,grep("avIkzf13_", colnames(dbcomb))])
+dbcomb$avBcat_binding <- rowMeans(dbcomb[,grep("avCtnnb1_", colnames(dbcomb))])
+genelvl <- dbcomb %>%
+  select(c(1,18:27,33:34)) %>%
+  group_by(gene_name) %>%
+  summarise_all(mean, na.rm=T) %>%
+  filter(gene_name!="" & 
+         abs(Expr_L2FC_NTC_Cre_vs_NTC_ERT2) > 0.58 & 
+         Expr_padj_NTC_Cre_vs_NTC_ERT2 < 0.05) %>%
+  arrange(-Expr_L2FC_NTC_Cre_vs_NTC_ERT2) %>%
+  as.data.frame() %>%
+  mutate(groupA = ifelse(Expr_L2FC_NTC_Cre_vs_NTC_ERT2 > 0.58, "act", "rep"),
+         groupB = ifelse(abs(Expr_L2FC_Ik_Cre_vs_Ik_ERT2) > 0.2, "alt", "unalt"),
+         group = paste0(groupA, "_", groupB))
+plotdat <- lapply(unique(genelvl$group), function(x) {
+  genes <- genelvl[which(genelvl$group==x),]$gene_name
+  tmp <- deres[deres$gene_symbol %in% genes, c(1, 27:29,21:23,24:26,18:20)]
+  tmp$group <- x
+  return(tmp)
+}) %>% bind_rows() %>%
+  gather("cond", "val", -c(1,14)) %>%
+  group_by(gene_symbol) %>%
+  mutate(cond=factor(cond, levels=unique(cond)),
+         gene=factor(gene_symbol, levels=unique(gene_symbol)),
+         val=scale(val),
+         gene_symbol=factor(gene_symbol, levels=unique(genelvl$gene_name)))
+p1 <- ggplot(filter(plotdat, group == "act_unalt"),
+             aes(x=cond, y=gene_symbol, fill=val)) +
+  geom_tile() +
+  scale_fill_gradient2(low="steelblue4", mid="white", high="firebrick4", midpoint = 0.75) +
+  scale_x_discrete(expand=c(0,0)) +
+  scale_y_discrete(expand=c(0,0)) +
+  theme_bw(base_size = 12) +
+  theme(axis.text.x = element_text(angle=45,hjust=1))
+p2 <- ggplot(filter(plotdat, group == "rep_act"),
+             aes(x=cond, y=gene_symbol, fill=val)) +
+  geom_tile() +
+  scale_fill_gradient2(low="steelblue4", mid="white", high="firebrick4", midpoint = -0.75) +
+  scale_x_discrete(expand=c(0,0)) +
+  scale_y_discrete(expand=c(0,0)) +
+  theme_bw(base_size = 12) +
+  theme(axis.text.x = element_text(angle=45,hjust=1))
+relheights <- table(plotdat$group)[c("act_rep","rep_act")]
+relheights <- sum(relheights)/relheights
+p <- cowplot::plot_grid(p1, p2, ncol=1, rel_heights = relheights)
+gen_pptx(p, "../img/IkKO_BcatGOF_DB_DE_heatmap_rescale.pptx")
+```
+
+## Plot heatmaps
+```{r dbde_heatmaps}
+dbcomb$avIk_binding <- rowMeans(dbcomb[,grep("avIkzf13_", colnames(dbcomb))])
+dbcomb$avBcat_binding <- rowMeans(dbcomb[,grep("avCtnnb1_", colnames(dbcomb))])
+genelvl <- dbcomb %>%
+  filter(abs(distanceToTSS) < 5000) %>%
+  select(c(1,18:27,33:34)) %>%
+  group_by(gene_name) %>%
+  summarise_all(mean, na.rm=T) %>%
+  filter(gene_name !="" & 
+         !grepl("Rik[0-9]", gene_name) & 
+         avIk_binding > 3 & avBcat_binding > 3 &
+         abs(Expr_L2FC_NTC_Cre_vs_NTC_ERT2) > 0.58 & 
+         Expr_padj_NTC_Cre_vs_NTC_ERT2 < 0.05) %>%
+  arrange(-Expr_L2FC_NTC_Cre_vs_NTC_ERT2) %>%
+  as.data.frame() 
+plotdat <- deres[deres$gene_symbol %in% genelvl$gene_name, ] %>%
+  select(c(1, 27:29,21:23,24:26,18:20)) %>%
+  gather("cond", "val", -c(1)) %>%
+  group_by(gene_symbol) %>%
+  mutate(sample = factor(cond, levels=unique(cond)),
+         gene_symbol = factor(gene_symbol, levels=unique(genelvl$gene_name)),
+         val = scale(val)[,1],
+         condition = sub("^(.+)_r[0-9]$", "\\1", sample))
+av <- plotdat %>% group_by(gene_symbol, condition) %>%
+  summarise(val = mean(val)) %>%
+  spread(condition, val, -1) %>%
+  as.data.frame()
+av$group <- NA
+av[av$NTC_ERT2 < 0 & av$NTC_CreERT2 > 0 &
+     av$IkKO_ERT2 < 0.5 & av$IkKO_CreERT2 < 0.5,]$group <- "UP_low"
+av[av$NTC_ERT2 > 0 & av$NTC_CreERT2 < 0 &
+     av$IkKO_ERT2 > -0.2 & av$IkKO_CreERT2 > -0.2,]$group <- "DN_high"
+plotdat$group <- av[match(plotdat$gene_symbol, av$gene_symbol),]$group
+p1 <- ggplot(filter(plotdat, group == "UP_low"),
+             aes(x=sample, y=gene_symbol, fill=val)) +
+  geom_tile() +
+  scale_fill_gradient2(low="steelblue4", mid="white", high="firebrick4") +
+  scale_x_discrete(expand=c(0,0)) +
+  scale_y_discrete(expand=c(0,0)) +
+  theme_bw(base_size = 12) +
+  theme(axis.text.x = element_text(angle=45,hjust=1))
+p2 <- ggplot(filter(plotdat, group == "DN_high"),
+             aes(x=sample, y=gene_symbol, fill=val)) +
+  geom_tile() +
+  scale_fill_gradient2(low="steelblue4", mid="white", high="firebrick4") +
+  scale_x_discrete(expand=c(0,0)) +
+  scale_y_discrete(expand=c(0,0)) +
+  theme_bw(base_size = 12) +
+  theme(axis.text.x = element_text(angle=45,hjust=1))
+p <- cowplot::plot_grid(p1, p2, ncol=1, align="vh", rel_heights = c(1,0.5))
+gen_pptx(p, "../img/IkKO_BcatGOF_DB_DE_heatmap_selected.pptx")
+```
+
+## Plot heatmaps
+```{r dbde_heatmaps}
+genelvl <- dbcomb %>%
+  select(c(1,18:27,33:34)) %>%
+  group_by(gene_name) %>%
+  summarise_all(mean, na.rm=T) %>%
+  filter(gene_name !="" & 
+         !grepl("Rik", gene_name) & 
+         abs(Expr_L2FC_NTC_Cre_vs_NTC_ERT2) > 0.58 & 
+         Expr_padj_NTC_Cre_vs_NTC_ERT2 < 0.05 &
+         abs(Expr_L2FC_Ik_Cre_vs_Ik_ERT2) < 0.2) %>%
+  arrange(-Expr_L2FC_NTC_Cre_vs_NTC_ERT2) %>%
+  as.data.frame()
+plotdat <- deres[deres$gene_symbol %in% genelvl$gene_name, ] %>%
+  select(c(1, 27:29,21:23,24:26,18:20)) %>%
+  mutate(NTC_FC_1 = NTC_CreERT2_r1 - NTC_ERT2_r1,
+         NTC_FC_2 = NTC_CreERT2_r2 - NTC_ERT2_r2,
+         NTC_FC_3 = NTC_CreERT2_r3 - NTC_ERT2_r3,
+         Ik_FC_1 = IkKO_CreERT2_r1 - IkKO_ERT2_r1,
+         Ik_FC_2 = IkKO_CreERT2_r2 - IkKO_ERT2_r2,
+         Ik_FC_3 = IkKO_CreERT2_r3 - IkKO_ERT2_r3) %>%
+  mutate(avNTC_FC = rowMeans(.[,14:16]),
+         avIk_FC = rowMeans(.[,17:19])) %>%
+  select(c(1,20:21,14:19))
+plotdat <- plotdat %>%
+  gather("cond", "val", -c(1:3)) %>%
+  group_by(gene_symbol) %>%
+  mutate(sample = factor(cond, levels=unique(cond)),
+         gene_symbol = factor(gene_symbol, levels=unique(genelvl$gene_name)),
+         val = val,
+         condition = sub("^(.+)_[0-9]$", "\\1", sample))
+p1 <- ggplot(plotdat, aes(x=sample, y=gene_symbol, fill=val)) +
+  geom_tile() +
+  scale_fill_gradient2(low="steelblue4", mid="white", high="firebrick4") +
+  scale_x_discrete(expand=c(0,0)) +
+  scale_y_discrete(expand=c(0,0)) +
+  theme_bw(base_size = 12) +
+  theme(axis.text.x = element_text(angle=45,hjust=1))
+gen_pptx(p1, "IkKO_BcatGOF_DB_DE_heatmap_selected.pptx", height = 6, width = 4.5)
+```
+
+```{r}
+genelvl <- dbcomb %>%
+  select(c(1,18:27,33:34)) %>%
+  group_by(gene_name) %>%
+  summarise_all(mean, na.rm=T) %>%
+  filter(gene_name !="" & 
+         !grepl("Rik", gene_name) & 
+         Expr_padj_NTC_Cre_vs_NTC_ERT2 < 0.05) %>%
+  filter((Expr_L2FC_NTC_Cre_vs_NTC_ERT2 > 0.58 & Expr_L2FC_Ik_Cre_vs_Ik_ERT2 < -0.2) |
+         (Expr_L2FC_NTC_Cre_vs_NTC_ERT2 < -0.58 & Expr_L2FC_Ik_Cre_vs_Ik_ERT2 > 0.2)) %>%
+  arrange(-Expr_L2FC_NTC_Cre_vs_NTC_ERT2) %>%
+  as.data.frame()
+plotdat <- deres[deres$gene_symbol %in% genelvl$gene_name, ] %>%
+  select(c(1, 27:29,21:23,24:26,18:20)) %>%
+  mutate(NTC_FC_1 = NTC_CreERT2_r1 - NTC_ERT2_r1,
+         NTC_FC_2 = NTC_CreERT2_r2 - NTC_ERT2_r2,
+         NTC_FC_3 = NTC_CreERT2_r3 - NTC_ERT2_r3,
+         Ik_FC_1 = IkKO_CreERT2_r1 - IkKO_ERT2_r1,
+         Ik_FC_2 = IkKO_CreERT2_r2 - IkKO_ERT2_r2,
+         Ik_FC_3 = IkKO_CreERT2_r3 - IkKO_ERT2_r3) %>%
+  mutate(avNTC_FC = rowMeans(.[,14:16]),
+         avIk_FC = rowMeans(.[,17:19])) %>%
+  select(c(1,20:21,14:19))
+plotdat <- plotdat %>%
+  gather("cond", "val", -c(1:3)) %>%
+  group_by(gene_symbol) %>%
+  mutate(sample = factor(cond, levels=unique(cond)),
+         gene_symbol = factor(gene_symbol, levels=unique(genelvl$gene_name)),
+         val = val,
+         condition = sub("^(.+)_[0-9]$", "\\1", sample))
+p1 <- ggplot(plotdat, aes(x=sample, y=gene_symbol, fill=val)) +
+  geom_tile() +
+  scale_fill_gradient2(low="steelblue4", mid="white", high="firebrick4") +
+  scale_x_discrete(expand=c(0,0)) +
+  scale_y_discrete(expand=c(0,0)) +
+  theme_bw(base_size = 12) +
+  theme(axis.text.x = element_text(angle=45,hjust=1))
+gen_pptx(p1, "IkKO_BcatGOF_DB_DE_heatmap_reversed.pptx", height = 4.5, width = 4.5)
+```
+
+```{r}
+genelvl <- dbcomb %>%
+  select(c(1,12,14,18:27,33:34)) %>%
+  group_by(gene_name) %>%
+  summarise_all(mean, na.rm=T) %>%
+  filter(avIkzf13_ERT2 > 4 &
+         gene_name !="" &
+         !grepl("Rik", gene_name) &
+         Expr_padj_NTC_Cre_vs_NTC_ERT2 < 0.05) %>%
+  filter((abs(Expr_L2FC_NTC_Cre_vs_NTC_ERT2) > 0.58 &
+          abs(Expr_L2FC_Ik_Cre_vs_Ik_ERT2) < 0.2) |
+          gene_name == "Myc") %>%
+  # filter((Expr_L2FC_NTC_Cre_vs_NTC_ERT2 > 0.58 & Expr_L2FC_Ik_Cre_vs_Ik_ERT2 < -0.2) |
+  #        (Expr_L2FC_NTC_Cre_vs_NTC_ERT2 < -0.58 & Expr_L2FC_Ik_Cre_vs_Ik_ERT2 > 0.2)) %>%
+  arrange(-Expr_L2FC_NTC_Cre_vs_NTC_ERT2) %>%
+  as.data.frame()
+plotdat <- deres[deres$gene_symbol %in% genelvl$gene_name, ] %>%
+  select(c(1, 27:29,21:23,24:26,18:20)) %>%
+  mutate(NTC_FC_1 = NTC_CreERT2_r1 - NTC_ERT2_r1,
+         NTC_FC_2 = NTC_CreERT2_r2 - NTC_ERT2_r2,
+         NTC_FC_3 = NTC_CreERT2_r3 - NTC_ERT2_r3,
+         Ik_FC_1 = IkKO_CreERT2_r1 - IkKO_ERT2_r1,
+         Ik_FC_2 = IkKO_CreERT2_r2 - IkKO_ERT2_r2,
+         Ik_FC_3 = IkKO_CreERT2_r3 - IkKO_ERT2_r3) %>%
+  mutate(avNTC_FC = rowMeans(.[,14:16]),
+         avIk_FC = rowMeans(.[,17:19])) %>%
+  select(c(1,20:21,14:19))
+plotdat <- plotdat %>%
+  gather("cond", "val", -c(1:3)) %>%
+  group_by(gene_symbol) %>%
+  mutate(sample = factor(cond, levels=unique(cond)),
+         gene_symbol = factor(gene_symbol, levels=unique(genelvl$gene_name)),
+         # val = scale(val, center=F)[,1],
+         val= val,
+         condition = sub("^(.+)_[0-9]$", "\\1", sample))
+p1 <- ggplot(plotdat, aes(x=sample, y=gene_symbol, fill=val)) +
+  geom_tile() +
+  scale_fill_gradient2(low="steelblue4", mid="white", high="firebrick4") +
+  scale_x_discrete(expand=c(0,0)) +
+  scale_y_discrete(expand=c(0,0)) +
+  theme_bw(base_size = 12) +
+  theme(axis.text.x = element_text(angle=45,hjust=1))
+gen_pptx(p1, "IkKO_BcatGOF_DB_DE_heatmap_MYC_bound.pptx", height = 6, width = 4.5)
+```
+
+## Plot scatter
+```{r scatter}
+plotdat <- dbcomb %>%
+  filter(abs(Expr_L2FC_NTC_Cre_vs_NTC_ERT2) > 0.3) %>%
+  filter(avIk_binding > 5 & avBcat_binding > 5) %>%                 
+  filter(!duplicated(gene_name)) %>%
+  mutate(label=ifelse((gene_name %in% c("Myc","Tead1","Tbx19","Foxo1","Foxp1","Frat2") | 
+                         abs(Expr_L2FC_NTC_Cre_vs_NTC_ERT2) > 1.5), gene_name, NA))
+ggplot(plotdat, aes(x=Expr_L2FC_NTC_Cre_vs_NTC_ERT2, 
+                    y=Expr_L2FC_Ik_Cre_vs_Ik_ERT2, 
+                    fill=Expr_L2FC_NTC_Cre_vs_NTC_ERT2,
+                    label=label)) +
+  geom_hline(yintercept = 0, lty=2, alpha=.5) +
+  geom_vline(xintercept = 0, lty=2, alpha=.5) +
+  geom_point(shape=21, alpha=0.6, size=2) +
+  geom_text() +
+  scale_fill_gradient2(low="steelblue", mid="grey80", high="firebrick") +
+  theme_bw(base_size = 12) +
+  theme(panel.grid = element_blank(),
+        legend.position = "none")
+static <- ggplot(plotdat, 
+                 aes(x=Expr_L2FC_NTC_Cre_vs_NTC_ERT2, 
+                     y=Expr_L2FC_Ik_Cre_vs_NTC_Cre, 
+                     fill=Expr_L2FC_NTC_Cre_vs_NTC_ERT2)) +
+  geom_point(shape=21, alpha=0.6, size=2) +
+  scale_fill_gradient2(low="steelblue", mid="grey80", high="firebrick") +
+  theme_bw(base_size = 12) +
+  theme(panel.grid = element_blank(),
+        legend.position = "none")
+vect <- ggplot(plotdat, 
+               aes(x=Expr_L2FC_NTC_Cre_vs_NTC_ERT2, 
+                   y=Expr_L2FC_Ik_Cre_vs_NTC_Cre, 
+                   label=label)) +
+  geom_hline(yintercept = 0, lty=2, alpha=.5) +
+  geom_vline(xintercept = 0, lty=2, alpha=.5) +
+  geom_text() +
+  scale_fill_gradient2(low="steelblue", mid="grey80", high="firebrick") +
+  theme_bw(base_size = 12) +
+  theme(panel.grid = element_blank(),
+        legend.position = "none")
+source("../../resources/pptx_plot_func.R")
+gen_statvect_pptx(static=static, vectorized=vect, height = 3, width = 3.2,
+                  file="DE_scatter_ik.pptx")
+```
+
+
+## Downloads
+- <a href=".../results/IkKO_bcatGOF_DB_DE.2021-03-08.xlsx" download>Combined DB-DE</a> results table (xlsx).
+
+## Session info
+```{r sessioninfo}
+sessionInfo()
+```
